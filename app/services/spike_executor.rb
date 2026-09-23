@@ -13,17 +13,13 @@ class SpikeExecutor
 
   def call
     STEPS.each_with_index do |step, position|
-      next if checkpointed?(position)
+      # (run_id, position) is the spike's idempotency key; the row is committed before the call.
+      row = Step.find_or_create_by!(run: @run, position: position) { |s| s.status = "started" }
+      next if row.status == "succeeded"
 
       output = step.call(@run)
-      Step.create!(run: @run, position: position, status: "succeeded", output: output)
+      row.update!(status: "succeeded", output: output)
     end
     @run
-  end
-
-  private
-
-  def checkpointed?(position)
-    Step.exists?(run_id: @run.id, position: position, status: "succeeded")
   end
 end

@@ -1,0 +1,70 @@
+#!/usr/bin/env ruby
+# Phase 0 crash test. Usage: PGPORT=5433 CRASH_AT_POSITION=1 bin/spike_crash_test
+# CRASH_AT_POSITION (0, 1, 2) SIGKILLs the first executor process inside that step, after its
+# "started" row is written. Unset = clean run. A second process then resumes the same run.
+require "rbconfig"
+require_relative "../config/environment"
+
+def child_mode?
+  ARGV.first == "--child"
+end
+
+if child_mode?
+  run = Run.find(ARGV[1])
+  if (pos = ENV["CRASH_AT_POSITION"])
+    steps = SpikeExecutor::STEPS.dup
+    steps[pos.to_i] = ->(_run) { Process.kill("KILL", Process.pid); sleep }
+    SpikeExecutor.send(:remove_const, :STEPS)
+    SpikeExecutor.const_set(:STEPS, steps.freeze)
+  end
+  SpikeExecutor.new(run).call
+  exit 0
+end
+
+def spawn_executor(run, crash_at)
+  env = { "CRASH_AT_POSITION" => crash_at }
+  pid = Process.spawn(env, RbConfig.ruby, __FILE__, "--child", run.id.to_s)
+  Process.wait2(pid).last
+end
+
+def snapshot(run)
+  run.steps.order(:position).map { |s| "#{s.position}:#{s.status}" }.join(" ")
+end
+
+crash_at = ENV["CRASH_AT_POSITION"]
+run = Run.create!
+failures = []
+
+puts "== CRASH_AT_POSITION=#{crash_at.inspect}, run ##{run.id}"
+
+first = spawn_executor(run, crash_at)
+puts "process 1: #{first.signaled? ? "killed by signal #{first.termsig} (#{Signal.signame(first.termsig)})" : "exited #{first.exitstatus}"}"
+puts "state after process 1: #{snapshot(run)}"
+
+if crash_at
+  failures << "process 1 was not SIGKILLed" unless first.signaled? && Signal.signame(first.termsig) == "KILL"
+  crashed = run.steps.find_by(position: crash_at.to_i)
+  failures << "no started row left at position #{crash_at}" unless crashed&.status == "started"
+else
+  failures << "clean run did not exit 0" unless first.exitstatus == 0
+end
+
+second = spawn_executor(run, nil)
+puts "process 2: exited #{second.exitstatus}"
+puts "final state: #{snapshot(run)}"
+
+failures << "resume process failed" unless second.exitstatus == 0
+steps = run.steps.order(:position).to_a
+failures << "expected exactly 3 rows, got #{steps.size}" unless steps.size == 3
+failures << "positions are #{steps.map(&:position)}, expected [0, 1, 2]" unless steps.map(&:position) == [0, 1, 2]
+failures << "not all steps succeeded" unless steps.all? { |s| s.status == "succeeded" && s.output.present? }
+
+if failures.empty?
+  puts "PASS"
+else
+  puts "FAIL: #{failures.join("; ")}"
+end
+
+Step.where(run_id: run.id).delete_all
+run.destroy
+exit(failures.empty? ? 0 : 1)

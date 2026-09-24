@@ -13,7 +13,9 @@ if child_mode?
   run = Run.find(ARGV[1])
   if (pos = ENV["CRASH_AT_POSITION"])
     steps = SpikeExecutor::STEPS.dup
-    steps[pos.to_i] = ->(_run) { Process.kill("KILL", Process.pid); sleep }
+    real = steps[pos.to_i]
+    # Run the real step body (its side effect is logged), then die before it can return output.
+    steps[pos.to_i] = ->(run) { real.call(run); Process.kill("KILL", Process.pid); sleep }
     SpikeExecutor.send(:remove_const, :STEPS)
     SpikeExecutor.const_set(:STEPS, steps.freeze)
   end
@@ -29,6 +31,19 @@ end
 
 def snapshot(run)
   run.steps.order(:position).map { |s| "#{s.position}:#{s.status}" }.join(" ")
+end
+
+def invocation_counts(run)
+  SpikeExecutor::STEP_NAMES.map { |name| StepInvocation.where(run_id: run.id, step: name).count }
+end
+
+def report(run)
+  invoked = invocation_counts(run)
+  checkpointed = SpikeExecutor::STEP_NAMES.each_index.map { |i| run.steps.where(position: i, status: "succeeded").count }
+  SpikeExecutor::STEP_NAMES.each_with_index do |name, i|
+    puts "  step #{i} #{name.ljust(13)} invoked: #{invoked[i]}, checkpointed: #{checkpointed[i]}"
+  end
+  invoked
 end
 
 crash_at = ENV["CRASH_AT_POSITION"]
@@ -52,6 +67,7 @@ end
 second = spawn_executor(run, nil)
 puts "process 2: exited #{second.exitstatus}"
 puts "final state: #{snapshot(run)}"
+invoked = report(run)
 
 failures << "resume process failed" unless second.exitstatus == 0
 steps = run.steps.order(:position).to_a
@@ -59,12 +75,17 @@ failures << "expected exactly 3 rows, got #{steps.size}" unless steps.size == 3
 failures << "positions are #{steps.map(&:position)}, expected [0, 1, 2]" unless steps.map(&:position) == [0, 1, 2]
 failures << "not all steps succeeded" unless steps.all? { |s| s.status == "succeeded" && s.output.present? }
 
+expected = [1, 1, 1]
+expected[crash_at.to_i] = 2 if crash_at
+failures << "invocation counts #{invoked}, expected #{expected}" unless invoked == expected
+
 if failures.empty?
   puts "PASS"
 else
   puts "FAIL: #{failures.join("; ")}"
 end
 
+StepInvocation.where(run_id: run.id).delete_all
 Step.where(run_id: run.id).delete_all
 run.destroy
 exit(failures.empty? ? 0 : 1)

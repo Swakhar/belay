@@ -1,0 +1,2 @@
+class StepInvocation < ApplicationRecord
+end

@@ -27,3 +27,8 @@
 
 # Ignore master key for decrypting credentials and more.
 /config/master.key
+
+# Gem build output.
+/pkg/
+*.gem
+/Gemfile.lock

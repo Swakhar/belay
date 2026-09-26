@@ -57,3 +57,30 @@ Streaming and durability pull in opposite directions: a partial response that is
 ## 10. Caching applies to decisions, never to extracted values
 
 The cache is opt-in and limited to steps whose output is a classification or a decision. Extracted numbers — totals, dates, account identifiers — are never served from cache, because two documents that produce the same prompt hash are not guaranteed to be the same document.
+
+## 11. Phase 0 spike: proof that resume works
+
+Before building the library, we built a throwaway Rails app (branch `spike/resume`, never merged) to answer one question: if a process is killed with `kill -9` in the middle of a run, does the run pick up at the right step when restarted?
+
+The spike is deliberately tiny. A run has three hardcoded steps, and each step is one row in a `steps` table (`position`, `status`, `output`). Before a step's code runs, its row is committed as `started`. After the code returns, the row is updated to `succeeded` with the output. When a run is restarted, `succeeded` steps are skipped and a leftover `started` step is run again.
+
+To test it, a script (`bin/spike_crash_test` on that branch) runs the steps in a separate OS process. The step at a chosen position runs its real code, which records one row in a separate `step_invocations` log table, and then sends itself SIGKILL before it can return. A second process then restarts the same run. SIGKILL gives the process no chance to clean up, so this is a real hard stop, not a raised exception.
+
+### Result
+
+In every scenario the restarted run finished with exactly three `succeeded` steps at positions 0, 1 and 2, with no duplicate and no missing row. The table shows how many times each step's code ran, against how many times it was checkpointed:
+
+| Scenario | fetch_invoice | extract_total | book_payment |
+|---|---|---|---|
+| killed during step 0 | **2** ran / 1 checkpointed | 1 / 1 | 1 / 1 |
+| killed during step 1 | 1 / 1 | **2** ran / 1 checkpointed | 1 / 1 |
+| killed during step 2 | 1 / 1 | 1 / 1 | **2** ran / 1 checkpointed |
+| not killed | 1 / 1 | 1 / 1 | 1 / 1 |
+
+### Conclusion: at-least-once
+
+Resume works: the checkpoints survive a hard kill and the run continues from the first unfinished step. But the step that was killed ran its code twice, once before the kill and once after the restart, while being checkpointed once. The kill landed after the side effect and before the output was written, and no database design can close that window. So delivery is **at-least-once**, and exactly-once holds only when the step's own side effect is idempotent. Decision 2 above is the response to this, and decisions 3 and 4 (a key that is stable across attempts, and no transaction held across the call) are what make the `started` row and a safe retry possible.
+
+### What the spike did not test
+
+It did not kill the process during the `started` insert itself, run two workers against one run, or use leases. The side effect was a local table insert, not an external API, so no idempotency key was actually honoured by anything. It also retries every leftover `started` step unconditionally. The rule in decision 2, where a non-idempotent step is flagged `needs_review` instead of being retried, is not implemented in the spike.

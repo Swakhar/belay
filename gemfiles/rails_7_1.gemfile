@@ -1,0 +1,8 @@
+# frozen_string_literal: true
+
+# Pins the minimum supported Rails so CI never silently tests a newer one.
+gem "activejob", "~> 7.1.0"
+gem "activerecord", "~> 7.1.0"
+gem "railties", "~> 7.1.0"
+
+eval_gemfile File.expand_path("../Gemfile", __dir__)

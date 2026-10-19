@@ -15,6 +15,7 @@ module Belay
   require_relative "belay/provider_response"
   require_relative "belay/provider"
   require_relative "belay/fake_provider"
+  require_relative "belay/anthropic_provider"
   require_relative "belay/executor"
   require_relative "belay/resume_run_job"
   require_relative "belay/janitor_job"

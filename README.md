@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, and the idempotent:/needs_review policy are implemented — the "boring," no-gate path of the Target API below actually runs. Not yet implemented: `gate`, `pending_gate`, `approve!`/`reject!` (Phase 2), the `llm` helper and a real provider (Phase 1g), and leases/background jobs (Phase 1f) — a run executes synchronously in the calling process today.
+**Status:** pre-release. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), and `Belay::AnthropicProvider` are implemented — the "boring," no-gate path of the Target API below actually runs. Not yet implemented: `gate`, `pending_gate`, `approve!`/`reject!` (Phase 2), and the `llm` helper (Phase 1g) that would call a provider for you — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
 
 ## Installation
 
@@ -38,7 +38,7 @@ Belay.configure do |config|
 end
 ```
 
-Both settings default to the values above; the initializer is only needed to change them. Nothing reads them yet — that's the leases work in Phase 1f.
+Both settings default to the values above; the initializer is only needed to change them. `lease_duration` is read by `Run#acquire_lease!`/`#heartbeat_lease!` and `JanitorJob`; `heartbeat_interval` is how often a caller is expected to heartbeat (nothing currently heartbeats automatically mid-step - see `lib/belay/resume_run_job.rb`'s and `lib/belay/janitor_job.rb`'s comments for the gap this leaves for a step slower than `lease_duration`).
 
 ## Target API
 
@@ -75,6 +75,24 @@ run.approve!(by: current_user) # not yet implemented - Phase 2
 `input`, `step` (including `retries:` and `kind:`), `workflow_version`, `.start` with idempotency_key deduplication, and `ctx.step_idempotency_key` are implemented, against the real checkpoint/resume mechanics below — not a stub.
 
 A step is never re-executed once its output is checkpointed. A step's block raising is caught, marked failed with the error recorded, and retried up to `retries:` times before propagating. A step orphaned by a crash (found `started`, no exception ever caught) is resumed automatically only if declared `idempotent: true`; otherwise it's flagged `needs_review`, the run is paused, and the step's own block never runs again until a human resolves it (no resolve action exists yet - that's part of the Phase 2 dashboard). See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for the delivery guarantee (at-least-once, exactly-once only for idempotent steps) and the reasoning behind the rest of the design.
+
+## Calling Anthropic directly (until the `llm` helper lands)
+
+`Belay::AnthropicProvider` calls Anthropic's Messages API directly (stdlib `Net::HTTP`, no extra gem dependency) and returns a `Belay::ProviderResponse`. There's no `llm` helper wiring this into `step` yet (Phase 1g), so call it yourself inside a step for now:
+
+```ruby
+provider = Belay::AnthropicProvider.new(
+  api_key: Rails.application.credentials.anthropic_api_key, # or ENV["ANTHROPIC_API_KEY"] by default
+  pricing: { "claude-sonnet-5-5" => { input_per_million: 3.0, output_per_million: 15.0 } } # optional; cost_cents is nil without it
+)
+
+step :extract do |ctx|
+  response = provider.call(model: "claude-sonnet-5-5", prompt: Prompts.extract(ctx.invoice.raw_text), schema: InvoiceSchema)
+  response.content # Hash matching schema when schema: is given (Anthropic's structured outputs), String otherwise
+end
+```
+
+`InvoiceSchema` must set `additionalProperties: false` on every object in the schema - Anthropic's own requirement for structured outputs. `pricing:` is deliberately not pre-filled with Anthropic's current rates - they change, and a stale hardcoded number is worse than an honest `nil`. `response.cost_cents` is `nil` for any model you haven't priced.
 
 ## Roadmap
 

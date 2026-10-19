@@ -1,23 +1,40 @@
 # frozen_string_literal: true
 
 module Belay
-  # Runs a workflow's steps in order against a Run. Each step writes its row as
+  # Runs a workflow's steps in order against a Run. Each attempt writes its row as
   # "started" - its own transaction, committed before the block runs - then the block
-  # runs, then the row is updated to "succeeded" with the output - a second,
-  # independent transaction. No transaction spans the block call itself (DESIGN_
-  # DECISIONS #4): if the block is killed or raises, the "started" row is already
-  # committed and visible, which is the whole point - a crash now leaves evidence of
-  # exactly where it happened, instead of losing the step silently.
+  # runs, then the row is updated to "succeeded" or "failed" - a second, independent
+  # transaction. No transaction spans the block call itself (DESIGN_DECISIONS #4): if
+  # the block is killed, the "started" row is already committed and visible, which is
+  # the whole point - a crash now leaves evidence of exactly where it happened,
+  # instead of losing the step silently.
   #
   # A step already checkpointed "succeeded" is skipped - its stored output is reused
   # to build later steps' Context, and its block never runs again. A step found
-  # "started" (orphaned by a crash) is re-run using the SAME row rather than creating
-  # a new one: deciding whether that's actually safe to retry (idempotent: true) vs.
-  # needing a human (needs_review) is still two separate, later commits - this one
-  # only answers "was it already done," not "is it safe to redo."
+  # "started" (orphaned by a crash) resumes using the SAME row. A step's block
+  # *raising* (as opposed to the process being killed) is caught here and marked
+  # "failed" with the error recorded, then retried - up to step(..., retries: N)
+  # additional attempts, each its own row sharing the position's idempotency_key -
+  # or re-raised once attempts are exhausted. retries: defaults to 0 (one attempt;
+  # a raise still gets marked failed with the error, just with nothing left to retry).
   #
-  # Still minimal: no new row per attempt yet (also a later commit) - an orphaned
-  # started row is updated in place, so attempt stays 1 even on a retried step.
+  # Deciding whether retrying an orphaned started row found on resume is actually safe
+  # (idempotent: true) vs. needing a human (needs_review) is still two separate,
+  # later commits - this only answers "was it already done" and "did retries run out,"
+  # not "is it safe to redo something a crash interrupted mid-flight."
+  #
+  # retries: is a different, narrower kind of safety than that idempotent: gate. It's
+  # the step author opting a specific step into automatic retry - the same contract
+  # every job-retry system has (Sidekiq's retry:, ActiveJob's retry_on): declaring it
+  # does not make a step's side effects safe to repeat, it says the author has
+  # already made them safe (or the step has none). A step whose block charges a card
+  # and then raises will be retried exactly as declared, with no additional gate -
+  # that's what ctx.step_idempotency_key (a later commit) is for passing to an
+  # idempotent-aware external API, not something this executor enforces on the
+  # author's behalf. idempotent:/needs_review, by contrast, is about retrying
+  # something nobody asked this executor to retry at all - a crash with no author
+  # opt-in either way. The two commits are separate because the safety question is
+  # different, not because one is "done" and the other "also needed."
   class Executor
     # A step declared without kind: (every current README Target API example) can't be
     # written to belay_steps as-is - kind is NOT NULL with no DB default, unlike status.
@@ -26,6 +43,10 @@ module Belay
     # from what a step's block actually does is executor work for later (Phase 1g,
     # once there's an llm helper whose use could signal "this one's an llm_call").
     DEFAULT_KIND = "decision"
+
+    # What one step's execution needs, bundled so passing it around doesn't mean a
+    # five-plus-argument parameter list on every private method below.
+    StepRun = Struct.new(:step_definition, :position, :outputs, :max_attempts, keyword_init: true)
 
     def initialize(run)
       @run = run
@@ -59,47 +80,94 @@ module Belay
                    "constant (#{e.message})"
     end
 
-    # Step#status has five legal values (started succeeded failed skipped
-    # needs_review), but this commit only has an answer for two of them. A row found
-    # already failed/skipped/needs_review was left that way for a reason this
-    # executor has no way to evaluate yet (that's the idempotent:/needs_review policy,
-    # still two separate later commits) - re-running it like an orphaned started row
-    # would be guessing, so it raises instead of guessing.
     def run_step(step_definition, position, outputs)
-      # attempt is always 1 today (one row per position), so plain find_by is correct
-      # right now - but has no defined tie-break once a second attempt row exists.
-      # .order(attempt: :desc) costs nothing today and means the retries commit
-      # doesn't silently need to remember to add it.
-      existing = Step.where(run: @run, position: position).order(attempt: :desc).first
+      max_attempts = 1 + (step_definition.options[:retries] || 0)
+      step_run = StepRun.new(step_definition: step_definition, position: position, outputs: outputs,
+                             max_attempts: max_attempts)
+      dispatch(step_run, latest_attempt(position))
+    end
 
+    # Step#status has five legal values. A row found already failed/skipped/
+    # needs_review (outside of the "ran out of retries" case this commit now handles
+    # for failed) was left that way for a reason this executor can't evaluate yet
+    # (the idempotent:/needs_review policy, still two separate later commits) -
+    # re-running it like an orphaned started row would be guessing.
+    def dispatch(step_run, existing) # rubocop:disable Metrics/MethodLength
       case existing&.status
-      when nil, "started"
-        run_and_checkpoint(step_definition, position, outputs, existing)
+      when nil
+        attempt_step(step_run, attempt: 1)
+      when "started"
+        attempt_step(step_run, attempt: existing.attempt, reuse: existing)
       when "succeeded"
         symbolize_output(existing.output)
+      when "failed"
+        retry_or_raise(step_run, existing)
       else
-        raise Error, "belay_steps##{existing.id} at position #{position} is #{existing.status.inspect} - " \
-                     "re-running it isn't safe without the idempotent:/needs_review policy, which doesn't exist yet"
+        raise unsafe_to_rerun_error(step_run, existing)
       end
     end
 
-    def run_and_checkpoint(step_definition, position, outputs, existing)
-      ctx = Context.new(input: @run.input, outputs: outputs)
-      step = existing || start_checkpoint!(step_definition, position)
-      output = step_definition.block.call(ctx)
-      step.update!(status: "succeeded", output: output)
-      output
+    def unsafe_to_rerun_error(step_run, existing)
+      Error.new(
+        "belay_steps##{existing.id} at position #{step_run.position} is #{existing.status.inspect} - " \
+        "re-running it isn't safe without the idempotent:/needs_review policy, which doesn't exist yet"
+      )
     end
 
-    def start_checkpoint!(step_definition, position)
+    def retry_or_raise(step_run, existing)
+      if existing.attempt < step_run.max_attempts
+        attempt_step(step_run, attempt: existing.attempt + 1)
+      else
+        raise Error, "belay_steps##{existing.id} at position #{step_run.position} failed on its final attempt " \
+                     "(#{existing.attempt}/#{step_run.max_attempts}): #{existing.error}"
+      end
+    end
+
+    # Loops in-process across retries (no separate Executor#call per attempt): each
+    # failure is caught and marked on its own row by run_attempt, then either a fresh
+    # attempt follows or the error is re-raised once max_attempts is reached.
+    def attempt_step(step_run, attempt:, reuse: nil)
+      loop do
+        step = reuse || start_checkpoint!(step_run, attempt)
+        output, error = run_attempt(step_run, step)
+        return output unless error
+
+        raise error if attempt >= step_run.max_attempts
+
+        attempt += 1
+        reuse = nil
+      end
+    end
+
+    # One attempt: run the block, checkpoint the result. Returns [output, nil] on
+    # success or [nil, error] on failure - never raises itself, so the retry loop
+    # above decides whether to try again or propagate.
+    def run_attempt(step_run, step)
+      ctx = Context.new(input: @run.input, outputs: step_run.outputs)
+      output = step_run.step_definition.block.call(ctx)
+      step.update!(status: "succeeded", output: output)
+      [output, nil]
+    rescue StandardError => e
+      step.update!(status: "failed", error: { "class" => e.class.name, "message" => e.message })
+      [nil, e]
+    end
+
+    def start_checkpoint!(step_run, attempt)
       Step.create!(
         run: @run,
-        position: position,
-        name: step_definition.name,
-        kind: step_definition.kind || DEFAULT_KIND,
+        position: step_run.position,
+        attempt: attempt,
+        name: step_run.step_definition.name,
+        kind: step_run.step_definition.kind || DEFAULT_KIND,
         status: "started",
-        idempotency_key: idempotency_key(position)
+        idempotency_key: idempotency_key(step_run.position)
       )
+    end
+
+    # attempt is no longer always 1 (retries), so the latest attempt's row is what a
+    # resume/skip decision must look at, not an arbitrary one.
+    def latest_attempt(position)
+      Step.where(run: @run, position: position).order(attempt: :desc).first
     end
 
     # A step's output read back from the DB (jsonb round-trips through JSON) has

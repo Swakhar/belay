@@ -148,7 +148,7 @@ RSpec.describe Belay::Executor do
   end
 
   describe "a step block that raises" do
-    it "propagates the error, leaving a started row (not succeeded, not missing) for the step that raised" do
+    it "propagates the error, marking the step failed with the error recorded - not started, not missing" do
       stub_const("ExecutorSpecRaisingWorkflow", Class.new(Belay::Workflow) do
         input :invoice_id
         step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
@@ -160,9 +160,111 @@ RSpec.describe Belay::Executor do
 
       steps = run.steps.order(:position).index_by(&:name)
       expect(steps["extract"].status).to eq("succeeded")
-      expect(steps["boom"].status).to eq("started")
-      expect(steps["boom"].output).to be_nil
+      expect(steps["boom"].status).to eq("failed")
+      expect(steps["boom"].attempt).to eq(1)
+      expect(steps["boom"].error).to eq("class" => "RuntimeError", "message" => "step blew up")
       expect(run.reload.status).to eq("running") # start! ran; complete! never got the chance to
+    end
+  end
+
+  describe "retries:" do
+    def build_flaky_workflow(fail_times:, retries: nil)
+      calls = 0
+      step_options = retries.nil? ? {} : { retries: retries }
+
+      stub_const("ExecutorSpecFlakyWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:flaky, **step_options) do |_ctx|
+          calls += 1
+          raise "attempt #{calls} failed" if calls <= fail_times
+
+          "succeeded on attempt #{calls}"
+        end
+      end)
+
+      [ExecutorSpecFlakyWorkflow, -> { calls }]
+    end
+
+    it "retries a failing step up to retries: times, each attempt its own row, succeeding within budget" do
+      workflow_class, calls = build_flaky_workflow(fail_times: 2, retries: 2)
+      run = build_run(workflow_class: workflow_class)
+
+      described_class.new(run).call
+
+      expect(calls.call).to eq(3)
+      attempts = run.steps.where(position: 0).order(:attempt)
+      expect(attempts.pluck(:attempt, :status)).to eq([[1, "failed"], [2, "failed"], [3, "succeeded"]])
+      expect(attempts.last.output).to eq("succeeded on attempt 3")
+      expect(attempts.first.idempotency_key).to eq(attempts.last.idempotency_key) # stable across attempts
+    end
+
+    it "raises once retries: is exhausted, leaving one failed row per attempt and no more" do
+      workflow_class, calls = build_flaky_workflow(fail_times: 99, retries: 1)
+      run = build_run(workflow_class: workflow_class)
+
+      expect { described_class.new(run).call }.to raise_error(RuntimeError, "attempt 2 failed")
+
+      expect(calls.call).to eq(2)
+      attempts = run.steps.where(position: 0).order(:attempt)
+      expect(attempts.pluck(:attempt, :status)).to eq([[1, "failed"], [2, "failed"]])
+    end
+
+    it "defaults to 0 retries (one attempt) when retries: isn't declared - no behavior change from before" do
+      workflow_class, calls = build_flaky_workflow(fail_times: 99, retries: nil)
+      run = build_run(workflow_class: workflow_class)
+
+      expect { described_class.new(run).call }.to raise_error(RuntimeError, "attempt 1 failed")
+
+      expect(calls.call).to eq(1)
+      expect(run.steps.where(position: 0).count).to eq(1)
+    end
+
+    it "resumes an orphaned started row into the retry loop at its own attempt number, not attempt 1" do
+      stub_const("ExecutorSpecResumeRetryWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:flaky, retries: 2) { |_ctx| "recovered" }
+      end)
+      run = build_run(workflow_class: ExecutorSpecResumeRetryWorkflow)
+      # Simulates a crash after attempt 2's started row committed but before the
+      # block (or the update after it) ever ran.
+      Belay::Step.create!(
+        run: run, position: 0, attempt: 2, name: "flaky", kind: "decision", status: "started",
+        idempotency_key: "#{run.id}:0"
+      )
+
+      described_class.new(run).call
+
+      attempts = run.steps.where(position: 0).order(:attempt)
+      expect(attempts.pluck(:attempt, :status)).to eq([[2, "succeeded"]])
+      expect(attempts.first.output).to eq("recovered")
+    end
+
+    it "creates a fresh row for the next attempt when a RESUMED row also fails, not corrupting the resumed row" do
+      calls = 0
+      stub_const("ExecutorSpecResumeRetryFailsAgainWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:flaky, retries: 2) do |_ctx|
+          calls += 1
+          raise "attempt 2 (resumed) failed too" if calls == 1
+
+          "recovered on attempt 3"
+        end
+      end)
+      run = build_run(workflow_class: ExecutorSpecResumeRetryFailsAgainWorkflow)
+      # Same crash as above, but this time the resumed attempt 2 ALSO fails - proving
+      # the loop starts a fresh attempt 3 row rather than reusing attempt 2's row a
+      # second time (which would silently corrupt that row's attempt history).
+      Belay::Step.create!(
+        run: run, position: 0, attempt: 2, name: "flaky", kind: "decision", status: "started",
+        idempotency_key: "#{run.id}:0"
+      )
+
+      described_class.new(run).call
+
+      attempts = run.steps.where(position: 0).order(:attempt)
+      expect(attempts.pluck(:attempt, :status)).to eq([[2, "failed"], [3, "succeeded"]])
+      expect(attempts.first.error).to eq("class" => "RuntimeError", "message" => "attempt 2 (resumed) failed too")
+      expect(attempts.last.output).to eq("recovered on attempt 3")
     end
   end
 

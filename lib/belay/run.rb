@@ -77,6 +77,30 @@ module Belay
       true
     end
 
+    # DESIGN_DECISIONS #5: "...and heartbeats while a step is in flight." Extends
+    # lease_expires_at by a fresh full duration, not by heartbeat_interval -
+    # how often a caller heartbeats and how long each renewal buys are different
+    # numbers (Belay.config has both; this method only uses lease_duration, same
+    # default as acquire_lease!).
+    #
+    # Only renews a lease that's both owned by this caller AND not yet expired - if
+    # it already expired, another worker may have already reclaimed it via
+    # acquire_lease!, and blindly extending would fight that worker rather than
+    # detect the conflict. A caller that discovers its own heartbeat failing should
+    # treat that as "I may have lost this run," not retry the heartbeat.
+    def heartbeat_lease!(owner:, duration: Belay.config.lease_duration) # rubocop:disable Naming/PredicateMethod
+      expires_at = Time.current + duration
+      renewed = self.class
+                    .where(id: id, lease_owner: owner)
+                    .where("lease_expires_at >= ?", Time.current)
+                    .update_all(lease_expires_at: expires_at)
+
+      return false unless renewed == 1
+
+      reload
+      true
+    end
+
     private
 
     # Each bang method declares its own required source status(es), rather than checking

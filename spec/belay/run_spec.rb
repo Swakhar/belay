@@ -178,4 +178,76 @@ RSpec.describe Belay::Run do
       expect(run.lease_expires_at).to be_within(1.second).of(frozen_now + Belay.config.lease_duration)
     end
   end
+
+  describe "#heartbeat_lease!" do
+    it "extends lease_expires_at for the current owner while the lease is still valid" do
+      run = build_run
+      run.acquire_lease!(owner: "worker-1", duration: 300)
+
+      result = run.heartbeat_lease!(owner: "worker-1", duration: 300)
+
+      expect(result).to be true
+      new_expiry = run.reload.lease_expires_at
+      expect(new_expiry).to be > Time.current + 290 # freshly extended, not the original ~300s window
+    end
+
+    it "succeeds at the exact instant the lease expires (>=), the precise complement of acquire's strict <" do
+      # Two separate runs, both leased to expire at exactly the same frozen instant,
+      # so testing one doesn't mutate the state the other is checked against.
+      heartbeat_run = build_run
+      reclaim_run = build_run
+      frozen_now = Time.current
+      allow(Time).to receive(:current).and_return(frozen_now)
+      heartbeat_run.acquire_lease!(owner: "worker-1", duration: 0) # lease_expires_at == frozen_now, exactly
+      reclaim_run.acquire_lease!(owner: "worker-1", duration: 0)
+
+      # At this exact instant: heartbeat (>=) succeeds for the original owner, and a
+      # second acquire (<) by someone else must NOT be able to reclaim it - the two
+      # conditions must never both be true for the same timestamp.
+      heartbeat_result = heartbeat_run.heartbeat_lease!(owner: "worker-1", duration: 300)
+      reclaim_result = reclaim_run.acquire_lease!(owner: "worker-2", duration: 300)
+
+      expect(heartbeat_result).to be true
+      expect(reclaim_result).to be false
+    end
+
+    it "refuses to heartbeat a lease owned by someone else" do
+      run = build_run
+      run.acquire_lease!(owner: "worker-1", duration: 300)
+      original_expiry = run.reload.lease_expires_at
+
+      result = run.heartbeat_lease!(owner: "worker-2", duration: 300)
+
+      expect(result).to be false
+      expect(run.reload.lease_expires_at).to eq(original_expiry)
+    end
+
+    it "refuses to heartbeat a lease that's already expired, even for the original owner" do
+      run = build_run
+      run.acquire_lease!(owner: "worker-1", duration: -1) # already expired
+
+      result = run.heartbeat_lease!(owner: "worker-1", duration: 300)
+
+      expect(result).to be false
+    end
+
+    it "refuses to heartbeat a run that was never leased at all" do
+      run = build_run
+
+      result = run.heartbeat_lease!(owner: "worker-1", duration: 300)
+
+      expect(result).to be false
+    end
+
+    it "defaults duration: to Belay.config.lease_duration" do
+      run = build_run
+      run.acquire_lease!(owner: "worker-1", duration: 300)
+      frozen_now = Time.current
+      allow(Time).to receive(:current).and_return(frozen_now)
+
+      run.heartbeat_lease!(owner: "worker-1")
+
+      expect(run.lease_expires_at).to be_within(1.second).of(frozen_now + Belay.config.lease_duration)
+    end
+  end
 end

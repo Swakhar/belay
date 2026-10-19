@@ -96,8 +96,59 @@ RSpec.describe Belay::Executor do
     end
   end
 
+  # This proves ordering (the row exists before the block runs), not full crash
+  # durability across a real process boundary. spec_helper.rb wraps every example in
+  # one begin_transaction(joinable: false), and AR's create! joins rather than opens a
+  # new transaction when one's already active - so the "started" INSERT below isn't
+  # committed at all in this suite, just an uncommitted statement on the one shared
+  # connection, visible only via read-your-own-writes. The second example makes that
+  # isolation boundary concrete instead of just asserting it in this comment. Full
+  # crash-proof testing (did it survive SIGKILL, not just "is it on the connection")
+  # is Phase 1h's job, with a real subprocess like the Phase 0 spike's.
+  it "writes the started row before the block runs - visible to a query from inside the block itself" do
+    visible_during_block = nil
+    stub_const("ExecutorSpecVisibilityWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) do |_ctx|
+        visible_during_block = Belay::Step.find_by(position: 0)&.status
+        "done"
+      end
+    end)
+    run = build_run(workflow_class: ExecutorSpecVisibilityWorkflow)
+
+    described_class.new(run).call
+
+    expect(visible_during_block).to eq("started")
+  end
+
+  it "is not actually committed in this suite - a different thread's own connection never sees it" do
+    # ActiveRecord's connection pool is thread-local: calling with_connection on the
+    # SAME thread just returns the one already checked out, which would trivially see
+    # its own uncommitted write. A real Thread gets its own pooled connection, giving
+    # an actual second observer instead of read-your-own-writes in disguise.
+    visible_on_other_thread = :not_set
+    stub_const("ExecutorSpecIsolationWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) do |_ctx|
+        Thread.new do
+          ActiveRecord::Base.connection_pool.with_connection do |other|
+            visible_on_other_thread = other.select_value(
+              "select status from belay_steps where position = 0"
+            )
+          end
+        end.join
+        "done"
+      end
+    end)
+    run = build_run(workflow_class: ExecutorSpecIsolationWorkflow)
+
+    described_class.new(run).call
+
+    expect(visible_on_other_thread).to be_nil
+  end
+
   describe "a step block that raises" do
-    it "propagates the error and leaves no checkpoint for the step that raised" do
+    it "propagates the error, leaving a started row (not succeeded, not missing) for the step that raised" do
       stub_const("ExecutorSpecRaisingWorkflow", Class.new(Belay::Workflow) do
         input :invoice_id
         step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
@@ -106,7 +157,11 @@ RSpec.describe Belay::Executor do
       run = build_run(workflow_class: ExecutorSpecRaisingWorkflow)
 
       expect { described_class.new(run).call }.to raise_error(RuntimeError, "step blew up")
-      expect(run.steps.pluck(:name)).to eq(["extract"])
+
+      steps = run.steps.order(:position).index_by(&:name)
+      expect(steps["extract"].status).to eq("succeeded")
+      expect(steps["boom"].status).to eq("started")
+      expect(steps["boom"].output).to be_nil
       expect(run.reload.status).to eq("running") # start! ran; complete! never got the chance to
     end
   end

@@ -16,6 +16,7 @@ module Belay
   require_relative "belay/provider"
   require_relative "belay/fake_provider"
   require_relative "belay/executor"
+  require_relative "belay/resume_run_job"
 
   # Raised by Run#start!/pause!/resume!/complete!/fail!/cancel! when the current
   # status doesn't allow the requested transition.

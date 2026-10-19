@@ -257,7 +257,7 @@ RSpec.describe Belay::Executor do
     it "resumes an orphaned started row into the retry loop at its own attempt number, not attempt 1" do
       stub_const("ExecutorSpecResumeRetryWorkflow", Class.new(Belay::Workflow) do
         input :invoice_id
-        step(:flaky, retries: 2) { |_ctx| "recovered" }
+        step(:flaky, retries: 2, idempotent: true) { |_ctx| "recovered" }
       end)
       run = build_run(workflow_class: ExecutorSpecResumeRetryWorkflow)
       # Simulates a crash after attempt 2's started row committed but before the
@@ -278,7 +278,7 @@ RSpec.describe Belay::Executor do
       calls = 0
       stub_const("ExecutorSpecResumeRetryFailsAgainWorkflow", Class.new(Belay::Workflow) do
         input :invoice_id
-        step(:flaky, retries: 2) do |_ctx|
+        step(:flaky, retries: 2, idempotent: true) do |_ctx|
           calls += 1
           raise "attempt 2 (resumed) failed too" if calls == 1
 
@@ -300,6 +300,54 @@ RSpec.describe Belay::Executor do
       expect(attempts.pluck(:attempt, :status)).to eq([[2, "failed"], [3, "succeeded"]])
       expect(attempts.first.error).to eq("class" => "RuntimeError", "message" => "attempt 2 (resumed) failed too")
       expect(attempts.last.output).to eq("recovered on attempt 3")
+    end
+  end
+
+  describe "idempotent: and an orphaned started row" do
+    def simulate_crashed_step(run)
+      Belay::Step.create!(
+        run: run, position: 0, name: "extract", kind: "decision", status: "started",
+        idempotency_key: "#{run.id}:0"
+      )
+    end
+
+    it "raises rather than automatically retrying a non-idempotent orphaned started row" do
+      stub_const("ExecutorSpecNonIdempotentWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } } # no idempotent: true
+      end)
+      run = build_run(workflow_class: ExecutorSpecNonIdempotentWorkflow)
+      step = simulate_crashed_step(run)
+
+      expect { described_class.new(run).call }
+        .to raise_error(Belay::Error, /#{step.id}.*position 0.*crash.*extract.*idempotent: true/)
+
+      # Nothing retried: still exactly the one started row, untouched.
+      expect(run.steps.where(position: 0).count).to eq(1)
+      expect(run.steps.find_by(position: 0).status).to eq("started")
+    end
+
+    it "treats idempotent: \"false\" (a string, not the boolean) as NOT idempotent, not as truthy" do
+      stub_const("ExecutorSpecStringIdempotentWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract, idempotent: "false") { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      end)
+      run = build_run(workflow_class: ExecutorSpecStringIdempotentWorkflow)
+      simulate_crashed_step(run)
+
+      expect { described_class.new(run).call }.to raise_error(Belay::Error, /idempotent: true/)
+    end
+
+    it "does not require idempotent: true for a step's normal first execution - only for resuming a crash" do
+      stub_const("ExecutorSpecFreshNonIdempotentWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } } # no idempotent: true, no existing row
+      end)
+      run = build_run(workflow_class: ExecutorSpecFreshNonIdempotentWorkflow)
+
+      described_class.new(run).call
+
+      expect(run.steps.find_by(position: 0).status).to eq("succeeded")
     end
   end
 
@@ -341,7 +389,11 @@ RSpec.describe Belay::Executor do
     end
 
     it "re-runs an orphaned started row in place, without creating a duplicate row or bumping attempt" do
-      run = build_run
+      stub_const("ExecutorSpecOrphanedIdempotentWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract, idempotent: true) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      end)
+      run = build_run(workflow_class: ExecutorSpecOrphanedIdempotentWorkflow)
       Belay::Step.create!(
         run: run, position: 0, name: "extract", kind: "decision", status: "started",
         idempotency_key: "#{run.id}:0"

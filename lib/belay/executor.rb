@@ -88,17 +88,15 @@ module Belay
 
       private
 
-      # Step#status has five legal values. A row found already failed/skipped/
-      # needs_review (outside of the "ran out of retries" case handled for failed) was
-      # left that way for a reason this can't evaluate yet (the idempotent:/
-      # needs_review policy, still two separate later commits) - re-running it like an
-      # orphaned started row would be guessing.
+      # Step#status has five legal values. A row found already skipped/needs_review
+      # was left that way for a reason this can't evaluate yet (needs_review handling
+      # is still a separate, later commit) - re-running it would be guessing.
       def dispatch(step_run, existing) # rubocop:disable Metrics/MethodLength
         case existing&.status
         when nil
           attempt_step(step_run, attempt: 1)
         when "started"
-          attempt_step(step_run, attempt: existing.attempt, reuse: existing)
+          resume_orphaned_started(step_run, existing)
         when "succeeded"
           symbolize_output(existing.output)
         when "failed"
@@ -108,10 +106,34 @@ module Belay
         end
       end
 
+      # DESIGN_DECISIONS #2: a step found "started" was interrupted before anything
+      # caught an exception for it (retries: never applies) - nobody asked this
+      # executor to retry it. idempotent: true is the author's explicit sign-off that
+      # redoing it is safe; without it, retrying automatically would be guessing
+      # exactly as much as the unsafe_to_rerun_error cases below. needs_review - what
+      # actually happens instead of raising - is still a separate, later commit; this
+      # one only answers "is it safe," not "what to do when it isn't."
+      #
+      # options[:idempotent] == true, not bare truthiness: nothing validates step
+      # option values at declare time (unlike kind:, see validate_step_kind! in
+      # Workflow), so idempotent: "false" - a string, not a boolean, from an author
+      # who doesn't think in Ruby truthiness - would otherwise be truthy and silently
+      # authorize resuming a step the author was trying to mark unsafe.
+      def resume_orphaned_started(step_run, existing)
+        unless step_run.step_definition.options[:idempotent] == true
+          raise Error, "belay_steps##{existing.id} at position #{step_run.position} was left \"started\" (by a " \
+                       "crash, or by another worker concurrently running this same step - no lease mechanism " \
+                       "exists yet to tell which) and step :#{step_run.step_definition.name} isn't declared " \
+                       "idempotent: true - retrying it automatically isn't safe"
+        end
+
+        attempt_step(step_run, attempt: existing.attempt, reuse: existing)
+      end
+
       def unsafe_to_rerun_error(step_run, existing)
         Error.new(
           "belay_steps##{existing.id} at position #{step_run.position} is #{existing.status.inspect} - " \
-          "re-running it isn't safe without the idempotent:/needs_review policy, which doesn't exist yet"
+          "re-running it isn't safe without the needs_review policy, which doesn't exist yet"
         )
       end
 

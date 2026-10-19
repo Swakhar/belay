@@ -115,4 +115,67 @@ RSpec.describe Belay::Run do
       expect { run.cancel! }.to raise_error(Belay::InvalidTransitionError)
     end
   end
+
+  describe "#acquire_lease!" do
+    it "claims an unleased run, setting lease_owner and an expiry duration: in the future" do
+      run = build_run
+      frozen_now = Time.current
+      allow(Time).to receive(:current).and_return(frozen_now)
+
+      result = run.acquire_lease!(owner: "worker-1", duration: 300)
+
+      expect(result).to be true
+      expect(run.lease_owner).to eq("worker-1")
+      expect(run.lease_expires_at).to be_within(1.second).of(frozen_now + 300)
+    end
+
+    it "reloads the record on a successful claim, reflecting what the conditional UPDATE actually wrote" do
+      run = build_run
+
+      run.acquire_lease!(owner: "worker-1", duration: 300)
+
+      expect(run.reload.lease_owner).to eq("worker-1")
+    end
+
+    it "refuses to claim a run already leased by someone else, before that lease expires" do
+      run = build_run
+      run.acquire_lease!(owner: "worker-1", duration: 300)
+
+      result = run.acquire_lease!(owner: "worker-2", duration: 300)
+
+      expect(result).to be false
+      expect(run.reload.lease_owner).to eq("worker-1")
+    end
+
+    it "allows reclaiming a run whose lease has already expired, by a different owner" do
+      run = build_run
+      run.acquire_lease!(owner: "worker-1", duration: -1) # already expired the moment it's set
+
+      result = run.acquire_lease!(owner: "worker-2", duration: 300)
+
+      expect(result).to be true
+      expect(run.reload.lease_owner).to eq("worker-2")
+    end
+
+    it "does not let the SAME owner re-acquire its own still-valid lease - that's heartbeating, not acquiring" do
+      run = build_run
+      run.acquire_lease!(owner: "worker-1", duration: 300)
+      original_expiry = run.reload.lease_expires_at
+
+      result = run.acquire_lease!(owner: "worker-1", duration: 600)
+
+      expect(result).to be false
+      expect(run.reload.lease_expires_at).to eq(original_expiry) # unchanged - not extended
+    end
+
+    it "defaults duration: to Belay.config.lease_duration" do
+      run = build_run
+      frozen_now = Time.current
+      allow(Time).to receive(:current).and_return(frozen_now)
+
+      run.acquire_lease!(owner: "worker-1")
+
+      expect(run.lease_expires_at).to be_within(1.second).of(frozen_now + Belay.config.lease_duration)
+    end
+  end
 end

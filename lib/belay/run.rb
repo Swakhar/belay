@@ -47,6 +47,36 @@ module Belay
       transition!(from: %w[pending running paused], to: "cancelled", finished_at: Time.current)
     end
 
+    # DESIGN_DECISIONS #5: "a worker claims a run with a conditional UPDATE on
+    # lease_owner/lease_expires_at." The condition - no owner yet, or the existing
+    # lease has expired - is evaluated by Postgres in the same statement that claims
+    # it, not read-then-written from Ruby: two workers racing here can't both see
+    # "unclaimed" and both proceed, the way the transition! comment above says two
+    # workers racing on status can. update_all's return value (rows actually
+    # matched) is the only thing this trusts; the in-memory object is reloaded only
+    # after a successful claim, never used to decide one.
+    #
+    # Only claims the lease - callers (ResumeRunJob et al, not built yet) are
+    # responsible for actually using it to serialize execution, and for releasing or
+    # heartbeating it (Phase 1f's next commits). Nothing here calls this yet either.
+    # Named with ! like start!/pause!/transition! above, not acquire_lease? - it's a
+    # mutator that also reports success, which is the pattern this class already
+    # uses for state changes. Diverges from those methods in one way: they raise on
+    # an invalid transition, this returns false on lost contention - contention is
+    # an expected, normal outcome here, not a bug to raise about.
+    def acquire_lease!(owner:, duration: Belay.config.lease_duration) # rubocop:disable Naming/PredicateMethod
+      expires_at = Time.current + duration
+      claimed = self.class
+                    .where(id: id)
+                    .where("lease_owner IS NULL OR lease_expires_at < ?", Time.current)
+                    .update_all(lease_owner: owner, lease_expires_at: expires_at)
+
+      return false unless claimed == 1
+
+      reload
+      true
+    end
+
     private
 
     # Each bang method declares its own required source status(es), rather than checking

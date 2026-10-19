@@ -1,17 +1,20 @@
 # frozen_string_literal: true
 
-require_relative "belay/version"
-require_relative "belay/configuration"
-require_relative "belay/application_record"
-require_relative "belay/run"
-require_relative "belay/step"
-require_relative "belay/workflow"
-require_relative "belay/context"
-require_relative "belay/provider_response"
-require_relative "belay/provider"
-
 module Belay
+  # Error must exist before any required file below, since several of them (e.g.
+  # FakeProvider::ScriptExhaustedError) subclass it at load time, not lazily.
   class Error < StandardError; end
+
+  require_relative "belay/version"
+  require_relative "belay/configuration"
+  require_relative "belay/application_record"
+  require_relative "belay/run"
+  require_relative "belay/step"
+  require_relative "belay/workflow"
+  require_relative "belay/context"
+  require_relative "belay/provider_response"
+  require_relative "belay/provider"
+  require_relative "belay/fake_provider"
 
   # Raised by Run#start!/pause!/resume!/complete!/fail!/cancel! when the current
   # status doesn't allow the requested transition.

@@ -79,6 +79,95 @@ RSpec.describe Belay::Workflow do
     expect(base.steps.map(&:name)).to eq([:a]) # base is unaffected by child existing
   end
 
+  describe ".step kind:" do
+    it "defaults to nil when not given" do
+      klass = workflow_class { step(:extract) { |ctx| ctx } }
+
+      expect(klass.steps.first.kind).to be_nil
+    end
+
+    it "is stored as a symbol, separate from options" do
+      klass = workflow_class { step(:book, kind: "decision", idempotent: true) { |ctx| ctx } }
+
+      expect(klass.steps.first.kind).to eq(:decision)
+      expect(klass.steps.first.options).to eq(idempotent: true)
+    end
+
+    it "raises a clear error for a kind that isn't a String, Symbol, or nil" do
+      expect { workflow_class { step(:extract, kind: 1) { |ctx| ctx } } }
+        .to raise_error(ArgumentError, /kind:.*String, Symbol, or nil/)
+    end
+  end
+
+  describe ".workflow_version" do
+    it "is a stable hex digest - the same class produces the same version every call" do
+      klass = workflow_class { step(:extract) { |ctx| ctx } }
+
+      expect(klass.workflow_version).to eq(klass.workflow_version)
+      expect(klass.workflow_version).to match(/\A[0-9a-f]{64}\z/)
+    end
+
+    it "is the same for two classes with identical name/kind/order, even with different block bodies" do
+      a = workflow_class do
+        step(:extract, kind: :llm_call) { |ctx| ctx }
+        step(:verify, kind: :decision, &:upcase)
+      end
+      b = workflow_class do
+        step(:extract, kind: :llm_call) { |_ctx| raise "totally different body" }
+        step(:verify, kind: :decision) { |_ctx| 42 }
+      end
+
+      expect(a.workflow_version).to eq(b.workflow_version)
+    end
+
+    it "changes when a step's name changes" do
+      a = workflow_class { step(:extract) { |ctx| ctx } }
+      b = workflow_class { step(:fetch) { |ctx| ctx } }
+
+      expect(a.workflow_version).not_to eq(b.workflow_version)
+    end
+
+    it "changes when a step's kind changes" do
+      a = workflow_class { step(:extract, kind: :llm_call) { |ctx| ctx } }
+      b = workflow_class { step(:extract, kind: :tool_call) { |ctx| ctx } }
+
+      expect(a.workflow_version).not_to eq(b.workflow_version)
+    end
+
+    it "changes when the order of two steps is swapped" do
+      a = workflow_class do
+        step(:extract) { |ctx| ctx }
+        step(:verify) { |ctx| ctx }
+      end
+      b = workflow_class do
+        step(:verify) { |ctx| ctx }
+        step(:extract) { |ctx| ctx }
+      end
+
+      expect(a.workflow_version).not_to eq(b.workflow_version)
+    end
+
+    it "does not change when only a step's options change (not yet part of the fingerprint)" do
+      a = workflow_class { step(:book, idempotent: true) { |ctx| ctx } }
+      b = workflow_class { step(:book, idempotent: false, retries: 3) { |ctx| ctx } }
+
+      expect(a.workflow_version).to eq(b.workflow_version)
+    end
+
+    it "changes when the declared inputs change, even if the steps are identical" do
+      a = workflow_class do
+        input :invoice_id
+        step(:extract) { |ctx| ctx }
+      end
+      b = workflow_class do
+        input :invoice_id, :customer_id
+        step(:extract) { |ctx| ctx }
+      end
+
+      expect(a.workflow_version).not_to eq(b.workflow_version)
+    end
+  end
+
   describe "immutability of what .inputs/.steps return" do
     it "returns a frozen array from .inputs, so a caller can't bypass the duplicate check" do
       klass = workflow_class { input :invoice_id }

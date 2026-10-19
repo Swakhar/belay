@@ -4,6 +4,8 @@ module Belay
   class Run < ApplicationRecord
     self.table_name = "belay_runs"
 
+    has_many :steps, class_name: "Belay::Step"
+
     # validate: false (the default) raises ArgumentError immediately on an invalid value,
     # rather than deferring to a validation error at save time. Right for internal state
     # management, which should fail loudly - but if status is ever set from unsanitized

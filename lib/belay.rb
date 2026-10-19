@@ -4,6 +4,7 @@ require_relative "belay/version"
 require_relative "belay/configuration"
 require_relative "belay/application_record"
 require_relative "belay/run"
+require_relative "belay/step"
 
 module Belay
   class Error < StandardError; end

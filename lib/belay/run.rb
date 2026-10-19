@@ -35,6 +35,11 @@ module Belay
       transition!(from: "paused", to: "running")
     end
 
+    # None of complete!/fail!/cancel! below clear lease_owner/lease_expires_at - a
+    # terminal run can be left holding a lease forever. Harmless today only because
+    # every caller of acquire_lease! (JanitorJob, Phase 1f) scopes to status: running
+    # first, so a stale lease on a terminal run is never actually read. Would need
+    # fixing if anything ever queries leases without that status filter.
     def complete!
       transition!(from: "running", to: "completed", finished_at: Time.current)
     end

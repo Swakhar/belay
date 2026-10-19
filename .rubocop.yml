@@ -8,6 +8,7 @@ AllCops:
     - "config/**/*"
     - "log/**/*"
     - "tmp/**/*"
+    - "spec/dummy/**/*"
 
 Style/StringLiterals:
   EnforcedStyle: double_quotes

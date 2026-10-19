@@ -78,4 +78,21 @@ RSpec.describe Belay::Context do
   it "is frozen itself, once constructed" do
     expect(described_class.new).to be_frozen
   end
+
+  describe "#step_idempotency_key" do
+    it "defaults to nil, so Context stays constructible standalone without one" do
+      expect(described_class.new.step_idempotency_key).to be_nil
+    end
+
+    it "exposes whatever value it's constructed with, verbatim" do
+      ctx = described_class.new(step_idempotency_key: "run-id:0")
+
+      expect(ctx.step_idempotency_key).to eq("run-id:0")
+    end
+
+    it "is a plain reader, not dynamically served - an input/output named the same still collides" do
+      expect { described_class.new(input: { step_idempotency_key: "sneaky" }) }
+        .to raise_error(ArgumentError, /step_idempotency_key.*collide with an existing method/)
+    end
+  end
 end

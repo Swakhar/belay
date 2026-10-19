@@ -71,6 +71,41 @@ RSpec.describe Belay::Executor do
     )
   end
 
+  it "exposes ctx.step_idempotency_key to the block, equal to what's written to the row" do
+    seen_in_block = nil
+    stub_const("ExecutorSpecIdempotencyKeyWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) do |ctx|
+        seen_in_block = ctx.step_idempotency_key
+        "done"
+      end
+    end)
+    run = build_run(workflow_class: ExecutorSpecIdempotencyKeyWorkflow)
+
+    described_class.new(run).call
+
+    expect(seen_in_block).to eq("#{run.id}:0")
+    expect(run.steps.find_by(position: 0).idempotency_key).to eq(seen_in_block)
+  end
+
+  it "keeps ctx.step_idempotency_key the same across every retry attempt (DESIGN_DECISIONS #3)" do
+    seen_per_attempt = []
+    stub_const("ExecutorSpecIdempotencyKeyAcrossRetriesWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:flaky, retries: 2) do |ctx|
+        seen_per_attempt << ctx.step_idempotency_key
+        raise "fail" if seen_per_attempt.size < 3
+
+        "done"
+      end
+    end)
+    run = build_run(workflow_class: ExecutorSpecIdempotencyKeyAcrossRetriesWorkflow)
+
+    described_class.new(run).call
+
+    expect(seen_per_attempt).to eq(["#{run.id}:0", "#{run.id}:0", "#{run.id}:0"])
+  end
+
   it "returns the run" do
     run = build_run
 

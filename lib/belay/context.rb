@@ -3,11 +3,12 @@
 module Belay
   # Passed as `ctx` to a step block (see README's Target API). Exposes the run's input
   # and prior steps' outputs as dotted method calls - ctx.invoice_id, ctx.extract - built
-  # from two plain hashes, with no coupling to a specific Belay::Workflow class.
-  #
-  # Nothing here constructs a real one from a live run; that's the executor's job
-  # (Phase 1e), along with ctx.step_idempotency_key, which is a separate, later
-  # commit (1e) and deliberately not implemented here.
+  # from two plain hashes, with no coupling to a specific Belay::Workflow class. Also
+  # exposes step_idempotency_key: a plain reader, not a method_missing-served dynamic
+  # key, since it's one fixed value for whichever step this Context was built for, not
+  # a named entry in input or outputs. Belay::Executor is the only thing that passes a
+  # real one (run_id + position, DESIGN_DECISIONS #3); it defaults to nil so Context
+  # stays constructible standalone, as every existing spec already does.
   #
   # The freeze below is shallow: @input/@outputs are frozen hashes, but a value inside
   # them (e.g. ctx.extract returning a Hash) is not. If the executor ever reuses one
@@ -17,11 +18,12 @@ module Belay
   # decided yet, and deep-freezing arbitrary step output is real added cost to pay for
   # a risk that depends on that undecided design.
   class Context
-    attr_reader :input, :outputs
+    attr_reader :input, :outputs, :step_idempotency_key
 
-    def initialize(input: {}, outputs: {})
+    def initialize(input: {}, outputs: {}, step_idempotency_key: nil)
       @input = symbolize_without_collision!(input, "input")
       @outputs = symbolize_without_collision!(outputs, "prior step output")
+      @step_idempotency_key = step_idempotency_key
       validate_no_name_collisions!
       freeze
     end

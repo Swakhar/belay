@@ -9,12 +9,15 @@ module Belay
   # committed and visible, which is the whole point - a crash now leaves evidence of
   # exactly where it happened, instead of losing the step silently.
   #
-  # Still minimal: no resuming past already-checkpointed steps yet (the next commit).
-  # Calling this a second time on the same run currently raises ActiveRecord::
-  # RecordNotUnique writing the first step's started row (Step.create! always takes
-  # attempt's DB default of 1, and [run_id, position, attempt] is unique) - not a
-  # clean re-run, a hard crash. spec/belay/executor_spec.rb has a test asserting this
-  # exact current behavior so it doesn't silently change out from under that commit.
+  # A step already checkpointed "succeeded" is skipped - its stored output is reused
+  # to build later steps' Context, and its block never runs again. A step found
+  # "started" (orphaned by a crash) is re-run using the SAME row rather than creating
+  # a new one: deciding whether that's actually safe to retry (idempotent: true) vs.
+  # needing a human (needs_review) is still two separate, later commits - this one
+  # only answers "was it already done," not "is it safe to redo."
+  #
+  # Still minimal: no new row per attempt yet (also a later commit) - an orphaned
+  # started row is updated in place, so attempt stays 1 even on a retried step.
   class Executor
     # A step declared without kind: (every current README Target API example) can't be
     # written to belay_steps as-is - kind is NOT NULL with no DB default, unlike status.
@@ -36,15 +39,19 @@ module Belay
         outputs[step_definition.name] = run_step(step_definition, position, outputs)
       end
 
-      @run.complete!
+      # Guarded the same way start! is above: a second call on an already-completed
+      # run must be a clean no-op, not InvalidTransitionError on complete! -> complete!.
+      @run.complete! if @run.running?
       @run
     end
 
     private
 
-    # @run.pending? above guards start! itself, but not this: nothing here yet decides
-    # what an already-running or already-completed run should do (that's what "skip
-    # already-checkpointed steps" - the next commit - actually needs to answer).
+    # @run.pending? above guards start! itself. complete! below assumes every call to
+    # this method runs all the way to the end successfully - calling this again on a
+    # run some OTHER code path already moved to failed/cancelled (nothing does that
+    # yet) would skip/re-run steps as normal but never re-reach complete!, since
+    # status never returns to "running". Not handled; stated here, not silently.
     def workflow_class
       @run.workflow.constantize
     rescue NameError => e
@@ -52,9 +59,33 @@ module Belay
                    "constant (#{e.message})"
     end
 
+    # Step#status has five legal values (started succeeded failed skipped
+    # needs_review), but this commit only has an answer for two of them. A row found
+    # already failed/skipped/needs_review was left that way for a reason this
+    # executor has no way to evaluate yet (that's the idempotent:/needs_review policy,
+    # still two separate later commits) - re-running it like an orphaned started row
+    # would be guessing, so it raises instead of guessing.
     def run_step(step_definition, position, outputs)
+      # attempt is always 1 today (one row per position), so plain find_by is correct
+      # right now - but has no defined tie-break once a second attempt row exists.
+      # .order(attempt: :desc) costs nothing today and means the retries commit
+      # doesn't silently need to remember to add it.
+      existing = Step.where(run: @run, position: position).order(attempt: :desc).first
+
+      case existing&.status
+      when nil, "started"
+        run_and_checkpoint(step_definition, position, outputs, existing)
+      when "succeeded"
+        symbolize_output(existing.output)
+      else
+        raise Error, "belay_steps##{existing.id} at position #{position} is #{existing.status.inspect} - " \
+                     "re-running it isn't safe without the idempotent:/needs_review policy, which doesn't exist yet"
+      end
+    end
+
+    def run_and_checkpoint(step_definition, position, outputs, existing)
       ctx = Context.new(input: @run.input, outputs: outputs)
-      step = start_checkpoint!(step_definition, position)
+      step = existing || start_checkpoint!(step_definition, position)
       output = step_definition.block.call(ctx)
       step.update!(status: "succeeded", output: output)
       output
@@ -69,6 +100,18 @@ module Belay
         status: "started",
         idempotency_key: idempotency_key(position)
       )
+    end
+
+    # A step's output read back from the DB (jsonb round-trips through JSON) has
+    # string keys, even though the very same Hash returned fresh from a block in this
+    # same process would have symbol keys. Without this, a step block written like
+    # the README's own ctx.extract[:total_cents] would get nil instead of the real
+    # value the moment the step it depends on was skipped rather than freshly run -
+    # silently, since symbol access on a string-keyed Hash just returns nil, not an
+    # error. Only one level deep matters here (only Hash has deep_symbolize_keys);
+    # scalars and bare Arrays pass through untouched.
+    def symbolize_output(output)
+      output.is_a?(Hash) ? output.deep_symbolize_keys : output
     end
 
     # run_id + position only, matching DESIGN_DECISIONS #3 - stable across attempts, so

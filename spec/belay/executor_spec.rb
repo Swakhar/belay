@@ -167,11 +167,69 @@ RSpec.describe Belay::Executor do
   end
 
   describe "calling it twice on the same run" do
-    it "currently raises RecordNotUnique on the first step - no skip-logic yet (that's the next commit)" do
-      run = build_run
+    it "is a no-op the second time: no error, no duplicate rows, no step block re-invoked" do
+      extract_calls = 0
+      stub_const("ExecutorSpecRepeatWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) do |ctx|
+          extract_calls += 1
+          { total_cents: ctx.invoice_id * 100 }
+        end
+      end)
+      run = build_run(workflow_class: ExecutorSpecRepeatWorkflow)
+
+      described_class.new(run).call
       described_class.new(run).call
 
-      expect { described_class.new(run).call }.to raise_error(ActiveRecord::RecordNotUnique)
+      expect(extract_calls).to eq(1)
+      expect(run.steps.count).to eq(1)
+    end
+
+    it "deep-symbolizes a skipped step's output, so a later block's symbol-key access sees what a fresh run sees" do
+      # Simulates a crash exactly between extract committing and verify ever getting a
+      # started row: extract already checkpointed, string-keyed exactly as Postgres
+      # would actually return it, nothing else touched yet.
+      run = build_run
+      Belay::Step.create!(
+        run: run, position: 0, name: "extract", kind: "decision", status: "succeeded",
+        output: { "total_cents" => 4200 }, idempotency_key: "#{run.id}:0"
+      )
+
+      described_class.new(run).call
+
+      # verify's block does ctx.extract[:total_cents].positive? - if extract's reused
+      # output weren't symbolized, [:total_cents] would be nil and this would raise
+      # NoMethodError on nil, not produce this value.
+      expect(run.steps.find_by(position: 1).output).to eq(true)
+    end
+
+    it "re-runs an orphaned started row in place, without creating a duplicate row or bumping attempt" do
+      run = build_run
+      Belay::Step.create!(
+        run: run, position: 0, name: "extract", kind: "decision", status: "started",
+        idempotency_key: "#{run.id}:0"
+      )
+
+      described_class.new(run).call
+
+      extract_rows = run.steps.where(position: 0)
+      expect(extract_rows.count).to eq(1)
+      expect(extract_rows.first.status).to eq("succeeded")
+      expect(extract_rows.first.attempt).to eq(1)
+      expect(extract_rows.first.output).to eq("total_cents" => 4200)
+    end
+
+    %w[failed skipped needs_review].each do |status|
+      it "raises rather than silently re-running a step already left #{status}" do
+        run = build_run
+        step = Belay::Step.create!(
+          run: run, position: 0, name: "extract", kind: "decision", status: status,
+          idempotency_key: "#{run.id}:0"
+        )
+
+        expect { described_class.new(run).call }
+          .to raise_error(Belay::Error, /#{step.id}.*position 0.*#{status}/)
+      end
     end
   end
 

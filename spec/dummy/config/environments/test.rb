@@ -51,4 +51,12 @@ Rails.application.configure do
 
   # Raise error when a before_action's only/except options reference missing actions
   config.action_controller.raise_on_missing_callback_actions = true
+
+  # spec/support/database.rb creates the test database and migrates it itself, every
+  # run, from the belay:install generator's own output. Rails' own schema-maintenance
+  # check would otherwise open a connection and check for pending migrations during
+  # Rails.application.initialize! - before that happens - which raises
+  # ActiveRecord::NoDatabaseError on a machine where the test database has never been
+  # created yet (a fresh clone has no dummy_test database until the first spec run).
+  config.active_record.maintain_test_schema = false
 end

@@ -22,3 +22,7 @@ Layout/LineLength:
 Metrics/BlockLength:
   Exclude:
     - "spec/**/*"
+
+Metrics/MethodLength:
+  Exclude:
+    - "spec/**/*"

@@ -5,4 +5,9 @@ gem "activejob", "~> 7.1.0"
 gem "activerecord", "~> 7.1.0"
 gem "railties", "~> 7.1.0"
 
+# activesupport 7.1.6's JSON encoder passes quirks_mode: to JSON.generate, a keyword the
+# json gem removed in 3.0. Confirmed present in 7.1.6 and still in 7.2.1.2; the fix landed
+# later in the 7.2 line and is fully gone by 8.1. Real incompatibility, not a style pin.
+gem "json", "~> 2.7"
+
 eval_gemfile File.expand_path("../Gemfile", __dir__)

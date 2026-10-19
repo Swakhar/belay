@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release. The API below is the target this gem is being built against. Nothing in this README works yet except `Belay::VERSION`.
+**Status:** pre-release. The API below is the target this gem is being built against. Nothing in this README works yet except `Belay::VERSION` and `Belay.configure` (see Configuration, below).
 
 ## Installation
 
@@ -20,6 +20,18 @@ bundle install
 ```
 
 Requires Ruby 3.2+, Rails 7.1+, and Postgres. See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for why.
+
+## Configuration
+
+```ruby
+# config/initializers/belay.rb
+Belay.configure do |config|
+  config.lease_duration = 300     # seconds a worker holds a run before the janitor reclaims it
+  config.heartbeat_interval = 30  # seconds between heartbeats while a step is in flight
+end
+```
+
+Both settings default to the values above; the initializer is only needed to change them. This is implemented; the rest of this README is not.
 
 ## Target API
 

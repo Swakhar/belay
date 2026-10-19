@@ -84,3 +84,7 @@ Resume works: the checkpoints survive a hard kill and the run continues from the
 ### What the spike did not test
 
 It did not kill the process during the `started` insert itself, run two workers against one run, or use leases. The side effect was a local table insert, not an external API, so no idempotency key was actually honoured by anything. It also retries every leftover `started` step unconditionally. The rule in decision 2, where a non-idempotent step is flagged `needs_review` instead of being retried, is not implemented in the spike.
+
+## 12. Default lease duration is 300s, heartbeat interval is 30s
+
+Decision 5 describes the lease mechanism (a column, heartbeated, reclaimed by a janitor) but not durations. A lease has to outlive the slowest expected step — a model call that takes tens of seconds — without staying claimed so long after a crash that a run looks stuck. 300 seconds is generous enough for a slow LLM call plus retries; 30 seconds gives a live worker ten heartbeats of margin before the janitor would consider the lease expired, so ordinary scheduling jitter never causes a false reclaim. Both live on `Belay::Configuration` and are overridable; nothing reads them yet, since leases aren't implemented until Phase 1f.

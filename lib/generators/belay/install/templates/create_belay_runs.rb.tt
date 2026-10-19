@@ -1,0 +1,25 @@
+class CreateBelayRuns < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def change
+    enable_extension "pgcrypto"
+
+    create_table :belay_runs, id: :uuid do |t|
+      t.string :workflow, null: false
+      t.string :workflow_version, null: false
+      t.jsonb :input, null: false, default: {}
+      t.string :status, null: false, default: "pending"
+      t.integer :current_position, null: false, default: 0
+      t.string :idempotency_key
+      t.string :lease_owner
+      t.datetime :lease_expires_at
+      t.jsonb :error
+      t.datetime :started_at
+      t.datetime :finished_at
+
+      t.timestamps
+    end
+
+    add_index :belay_runs, :idempotency_key, unique: true
+    add_index :belay_runs, [:status, :lease_expires_at]
+    add_index :belay_runs, :workflow
+  end
+end

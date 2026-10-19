@@ -21,6 +21,13 @@ bundle install
 
 Requires Ruby 3.2+, Rails 7.1+, and Postgres. See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for why.
 
+```sh
+rails generate belay:install
+rails db:migrate
+```
+
+This is implemented, but incomplete: the generator currently creates only the `belay_runs` migration. `belay_steps` is the next piece landing, so running `db:migrate` today does not yet give you a usable schema.
+
 ## Configuration
 
 ```ruby

@@ -3,10 +3,8 @@
 require "digest"
 
 module Belay
-  # Base class for workflow definitions (see README's Target API). Pure declaration: this
-  # class only records input names and step definitions in the order they were declared.
-  # Nothing here executes a step or validates input at runtime - that's the executor
-  # (Phase 1e) and Workflow.start (also Phase 1e), neither of which exist yet.
+  # Base class for workflow definitions (see README's Target API). .input/.step are pure
+  # declaration; .start (below) is where a Run actually gets created and executed.
   class Workflow
     StepDefinition = Struct.new(:name, :kind, :options, :block, keyword_init: true)
 
@@ -67,7 +65,73 @@ module Belay
         Digest::SHA256.hexdigest(fingerprint.inspect)
       end
 
+      # README's Target API: InvoiceWorkflow.start(invoice_id: 42, idempotency_key: "inv-42").
+      # idempotency_key: dedups at the RUN level (distinct from a step's own
+      # step_idempotency_key): calling .start twice with the same key returns the same
+      # Run rather than starting a second one, racing on belay_runs' own unique index
+      # on idempotency_key rather than a check-then-create in Ruby, which two
+      # concurrent callers could both pass.
+      #
+      # The dedup lookup runs before input validation, not after: a repeat call with
+      # the same key is asking "what happened to that run," and the input was already
+      # validated when the run was first created - a caller-side bug on a retry
+      # (stale/missing input) shouldn't turn a successful repeat lookup into an
+      # ArgumentError for a run that already exists and needs no further input at all.
+      #
+      # Only the run THIS call actually creates gets executed. A found-existing run -
+      # whether found outright or found after losing the create race - is returned
+      # without calling the executor on it: this gem has no lease mechanism yet
+      # (Phase 1f) to make running the same Executor concurrently from two places
+      # safe, so piling onto a run some OTHER caller may already be executing isn't
+      # attempted here.
+      def start(idempotency_key:, **input)
+        existing = Run.find_by(idempotency_key: idempotency_key)
+        return check_same_workflow!(existing) if existing
+
+        validate_input!(input)
+        run, newly_created = find_or_create_run(idempotency_key, input)
+        Executor.new(run).call if newly_created
+        run
+      end
+
       private
+
+      def validate_input!(input)
+        missing = inputs - input.keys
+        raise ArgumentError, "#{self}.start is missing required input(s): #{missing.inspect}" unless missing.empty?
+
+        extra = input.keys - inputs
+        return if extra.empty?
+
+        raise ArgumentError,
+              "#{self}.start received undeclared input(s): #{extra.inspect} - declared inputs are #{inputs.inspect}"
+      end
+
+      # The first find_by in #start above already covers the common case; this
+      # second lookup only runs for the race window between that read and this
+      # create - rescue is scoped to just create_run, not the surrounding lookup,
+      # so a RecordNotUnique from somewhere unexpected is never silently caught here.
+      def find_or_create_run(idempotency_key, input)
+        [create_run(idempotency_key, input), true]
+      rescue ActiveRecord::RecordNotUnique
+        [check_same_workflow!(Run.find_by!(idempotency_key: idempotency_key)), false]
+      end
+
+      def create_run(idempotency_key, input)
+        raise Error, "#{self} must be assigned to a constant before .start can use it as a workflow name" if name.nil?
+
+        Run.create!(workflow: name, workflow_version: workflow_version, input: input,
+                    idempotency_key: idempotency_key)
+      end
+
+      # A reused idempotency_key string across two different Workflow subclasses would
+      # otherwise silently return a Run belonging to the wrong workflow entirely.
+      def check_same_workflow!(run)
+        return run if run.workflow == name
+
+        raise Error, "idempotency_key #{run.idempotency_key.inspect} already belongs to a #{run.workflow} run " \
+                     "(belay_runs##{run.id}), not #{self}"
+      end
 
       # Subclasses never inherit a superclass's declarations: @inputs/@steps are plain
       # class-level ivars, not class_attribute. `class Child < Base; end` with no further

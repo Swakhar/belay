@@ -168,6 +168,138 @@ RSpec.describe Belay::Workflow do
     end
   end
 
+  describe ".start" do
+    def defined_workflow_class(name, &block)
+      stub_const(name, Class.new(described_class, &block))
+    end
+
+    it "creates and executes a run, returning it" do
+      klass = defined_workflow_class("WorkflowSpecStart") do
+        input :invoice_id
+        step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      end
+
+      run = klass.start(invoice_id: 42, idempotency_key: "wf-start-1")
+
+      expect(run).to be_a(Belay::Run)
+      expect(run.workflow).to eq("WorkflowSpecStart")
+      expect(run.workflow_version).to eq(klass.workflow_version)
+      expect(run.input).to eq("invoice_id" => 42)
+      expect(run.status).to eq("completed")
+      expect(run.steps.sole.output).to eq("total_cents" => 4200)
+    end
+
+    it "deduplicates on idempotency_key: calling it twice returns the same run and never re-executes" do
+      calls = 0
+      klass = defined_workflow_class("WorkflowSpecDedup") do
+        input :invoice_id
+        step(:extract) do |ctx|
+          calls += 1
+          { total_cents: ctx.invoice_id * 100 }
+        end
+      end
+
+      first = klass.start(invoice_id: 42, idempotency_key: "wf-dedup-1")
+      second = klass.start(invoice_id: 999, idempotency_key: "wf-dedup-1") # different input, same key
+
+      expect(second).to eq(first)
+      expect(calls).to eq(1)
+      expect(Belay::Run.where(idempotency_key: "wf-dedup-1").count).to eq(1)
+    end
+
+    it "returns the existing run on a repeat key even if this call's own input is invalid - no input needed twice" do
+      klass = defined_workflow_class("WorkflowSpecDedupBadInput") do
+        input :invoice_id
+        step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      end
+      first = klass.start(invoice_id: 42, idempotency_key: "wf-dedup-badinput-1")
+
+      # Missing invoice_id entirely this time - would fail validate_input! on its own,
+      # but the dedup lookup finds the existing run before validation ever runs.
+      second = klass.start(idempotency_key: "wf-dedup-badinput-1")
+
+      expect(second).to eq(first)
+    end
+
+    it "works for a workflow with no declared inputs at all" do
+      klass = defined_workflow_class("WorkflowSpecNoInputs") do
+        step(:extract) { |_ctx| "done" }
+      end
+
+      run = klass.start(idempotency_key: "wf-no-inputs-1")
+
+      expect(run.status).to eq("completed")
+      expect(run.input).to eq({})
+    end
+
+    it "raises a clear error rather than Run's own presence validation if the workflow class has no name" do
+      anonymous_klass = Class.new(described_class) do
+        input :invoice_id
+        step(:extract) { |ctx| ctx }
+      end
+
+      expect { anonymous_klass.start(invoice_id: 42, idempotency_key: "wf-anon-1") }
+        .to raise_error(Belay::Error, /must be assigned to a constant/)
+    end
+
+    it "raises ArgumentError for a missing required input" do
+      klass = defined_workflow_class("WorkflowSpecMissingInput") do
+        input :invoice_id, :customer_id
+        step(:extract) { |ctx| ctx }
+      end
+
+      expect { klass.start(invoice_id: 42, idempotency_key: "wf-missing-1") }
+        .to raise_error(ArgumentError, /missing required input.*customer_id/)
+    end
+
+    it "raises ArgumentError for an undeclared input" do
+      klass = defined_workflow_class("WorkflowSpecExtraInput") do
+        input :invoice_id
+        step(:extract) { |ctx| ctx }
+      end
+
+      expect { klass.start(invoice_id: 42, extra_thing: 1, idempotency_key: "wf-extra-1") }
+        .to raise_error(ArgumentError, /undeclared input.*extra_thing/)
+    end
+
+    it "raises if the same idempotency_key already belongs to a different workflow" do
+      defined_workflow_class("WorkflowSpecOwnerA") do
+        input :invoice_id
+        step(:extract) { |ctx| ctx }
+      end
+      klass_b = defined_workflow_class("WorkflowSpecOwnerB") do
+        input :invoice_id
+        step(:extract) { |ctx| ctx }
+      end
+      WorkflowSpecOwnerA.start(invoice_id: 1, idempotency_key: "wf-shared-key")
+
+      expect { klass_b.start(invoice_id: 1, idempotency_key: "wf-shared-key") }
+        .to raise_error(Belay::Error, /wf-shared-key.*WorkflowSpecOwnerA.*WorkflowSpecOwnerB/)
+    end
+
+    it "returns the existing run, without executing it again, if create! loses the race to another caller" do
+      klass = defined_workflow_class("WorkflowSpecRace") do
+        input :invoice_id
+        step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      end
+      # The run some OTHER caller already committed - this one's find_by (below) will
+      # be made to miss it once, simulating the race window between that commit and
+      # this call's own lookup.
+      winner = klass.start(invoice_id: 42, idempotency_key: "wf-race-1")
+
+      calls = 0
+      allow(Belay::Run).to receive(:find_by).and_wrap_original do |original, *args|
+        calls += 1
+        calls == 1 ? nil : original.call(*args)
+      end
+
+      loser_result = klass.start(invoice_id: 42, idempotency_key: "wf-race-1")
+
+      expect(loser_result).to eq(winner)
+      expect(Belay::Run.where(idempotency_key: "wf-race-1").count).to eq(1)
+    end
+  end
+
   describe "immutability of what .inputs/.steps return" do
     it "returns a frozen array from .inputs, so a caller can't bypass the duplicate check" do
       klass = workflow_class { input :invoice_id }

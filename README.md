@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release. The API below is the target this gem is being built against. Nothing in this README works yet except `Belay::VERSION` and `Belay.configure` (see Configuration, below).
+**Status:** pre-release. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, and the idempotent:/needs_review policy are implemented — the "boring," no-gate path of the Target API below actually runs. Not yet implemented: `gate`, `pending_gate`, `approve!`/`reject!` (Phase 2), the `llm` helper and a real provider (Phase 1g), and leases/background jobs (Phase 1f) — a run executes synchronously in the calling process today.
 
 ## Installation
 
@@ -26,7 +26,7 @@ rails generate belay:install
 rails db:migrate
 ```
 
-This creates the `belay_runs` and `belay_steps` migrations and is implemented. The models, DSL and executor that actually use these tables are not — see Target API, below.
+This creates the `belay_runs` and `belay_steps` migrations, and is implemented, along with the models, DSL, and executor that use them — see Target API, below.
 
 ## Configuration
 
@@ -38,7 +38,7 @@ Belay.configure do |config|
 end
 ```
 
-Both settings default to the values above; the initializer is only needed to change them. This is implemented; the rest of this README is not.
+Both settings default to the values above; the initializer is only needed to change them. Nothing reads them yet — that's the leases work in Phase 1f.
 
 ## Target API
 
@@ -47,7 +47,7 @@ class InvoiceWorkflow < Belay::Workflow
   input :invoice_id
 
   step :extract do |ctx|
-    llm(
+    llm( # not yet implemented - the llm helper and a real provider are Phase 1g
       model: "claude-sonnet-4-6",
       prompt: Prompts.extract(ctx.invoice.raw_text),
       schema: InvoiceSchema
@@ -59,7 +59,7 @@ class InvoiceWorkflow < Belay::Workflow
     Verifier.check_totals!(ctx.extract)
   end
 
-  gate :approval, when: ->(ctx) { ctx.extract[:total_cents] > 100_00 }
+  gate :approval, when: ->(ctx) { ctx.extract[:total_cents] > 100_00 } # not yet implemented - Phase 2
 
   step :book, idempotent: true do |ctx|
     Bookkeeping.record!(ctx.extract, key: ctx.step_idempotency_key)
@@ -67,12 +67,14 @@ class InvoiceWorkflow < Belay::Workflow
 end
 
 run = InvoiceWorkflow.start(invoice_id: 42, idempotency_key: "inv-42")
-run.status        # => "paused"
-run.pending_gate  # => approval
-run.approve!(by: current_user)
+run.status        # => "paused" once gates exist; today, "completed" or "paused" (needs_review stopped it)
+run.pending_gate  # not yet implemented - Phase 2
+run.approve!(by: current_user) # not yet implemented - Phase 2
 ```
 
-A step is never re-executed once its output is checkpointed. See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for the delivery guarantee (at-least-once, exactly-once only for idempotent steps) and the reasoning behind the rest of the design.
+`input`, `step` (including `retries:` and `kind:`), `workflow_version`, `.start` with idempotency_key deduplication, and `ctx.step_idempotency_key` are implemented, against the real checkpoint/resume mechanics below — not a stub.
+
+A step is never re-executed once its output is checkpointed. A step's block raising is caught, marked failed with the error recorded, and retried up to `retries:` times before propagating. A step orphaned by a crash (found `started`, no exception ever caught) is resumed automatically only if declared `idempotent: true`; otherwise it's flagged `needs_review`, the run is paused, and the step's own block never runs again until a human resolves it (no resolve action exists yet - that's part of the Phase 2 dashboard). See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for the delivery guarantee (at-least-once, exactly-once only for idempotent steps) and the reasoning behind the rest of the design.
 
 ## Roadmap
 

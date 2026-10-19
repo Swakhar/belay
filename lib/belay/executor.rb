@@ -49,10 +49,12 @@ module Belay
     # own row sharing the position's stable idempotency_key (DESIGN_DECISIONS #3).
     #
     # retries: is a different, narrower kind of safety than the idempotent:/
-    # needs_review gate for an orphaned started row (still two separate, later
-    # commits - deciding whether resuming a crash is actually safe isn't answered
-    # here, only "was it already done" and "did retries run out"). retries: is the
-    # step author opting a specific step into automatic retry - the same contract
+    # needs_review gate for an orphaned started row: that gate decides whether
+    # resuming a crash is actually safe (idempotent: true resumes it; otherwise the
+    # row is flagged needs_review and the run stops for a human), where retries:
+    # only ever answers "did retries run out" for a row the author already opted in
+    # to retrying. retries: is the step author opting a specific step into automatic
+    # retry - the same contract
     # every job-retry system has (Sidekiq's retry:, ActiveJob's retry_on): declaring
     # it does not make a step's side effects safe to repeat, it says the author has
     # already made them safe (or the step has none). A step whose block charges a
@@ -61,7 +63,7 @@ module Belay
     # aware external API, if the author chooses to; nothing here enforces that they
     # do. The two commits are separate because the safety question is different, not
     # because one is "done" and the other "also needed."
-    class StepRunner
+    class StepRunner # rubocop:disable Metrics/ClassLength
       # A step declared without kind: (every current README Target API example) can't
       # be written to belay_steps as-is - kind is NOT NULL with no DB default, unlike
       # status. "decision" is the generic catch-all of the four enum values for a step
@@ -89,8 +91,10 @@ module Belay
       private
 
       # Step#status has five legal values. A row found already skipped/needs_review
-      # was left that way for a reason this can't evaluate yet (needs_review handling
-      # is still a separate, later commit) - re-running it would be guessing.
+      # was left that way for a reason this can't evaluate yet - re-running it would
+      # be guessing, same as a freshly-flagged needs_review row would be if dispatch
+      # were called on it again in the same process (it never is, today: flagging
+      # always raises right after, see flag_needs_review! below).
       def dispatch(step_run, existing) # rubocop:disable Metrics/MethodLength
         case existing&.status
         when nil
@@ -110,9 +114,10 @@ module Belay
       # caught an exception for it (retries: never applies) - nobody asked this
       # executor to retry it. idempotent: true is the author's explicit sign-off that
       # redoing it is safe; without it, retrying automatically would be guessing
-      # exactly as much as the unsafe_to_rerun_error cases below. needs_review - what
-      # actually happens instead of raising - is still a separate, later commit; this
-      # one only answers "is it safe," not "what to do when it isn't."
+      # exactly as much as the unsafe_to_rerun_error cases below - so instead the row
+      # is flagged needs_review for a human, exactly as decision #2 says, and the run
+      # stops (flag_needs_review! raises; nothing resumes a needs_review run yet -
+      # that's dashboard/resolve-action work, not built).
       #
       # options[:idempotent] == true, not bare truthiness: nothing validates step
       # option values at declare time (unlike kind:, see validate_step_kind! in
@@ -120,20 +125,34 @@ module Belay
       # who doesn't think in Ruby truthiness - would otherwise be truthy and silently
       # authorize resuming a step the author was trying to mark unsafe.
       def resume_orphaned_started(step_run, existing)
-        unless step_run.step_definition.options[:idempotent] == true
-          raise Error, "belay_steps##{existing.id} at position #{step_run.position} was left \"started\" (by a " \
-                       "crash, or by another worker concurrently running this same step - no lease mechanism " \
-                       "exists yet to tell which) and step :#{step_run.step_definition.name} isn't declared " \
-                       "idempotent: true - retrying it automatically isn't safe"
-        end
+        return attempt_step(step_run, attempt: existing.attempt, reuse: existing) if idempotent?(step_run)
 
-        attempt_step(step_run, attempt: existing.attempt, reuse: existing)
+        flag_needs_review!(step_run, existing)
+      end
+
+      def idempotent?(step_run)
+        step_run.step_definition.options[:idempotent] == true
+      end
+
+      def flag_needs_review!(step_run, existing)
+        reason = "belay_steps##{existing.id} at position #{step_run.position} was left \"started\" (by a " \
+                 "crash, or by another worker concurrently running this same step - no lease mechanism " \
+                 "exists yet to tell which) and step :#{step_run.step_definition.name} isn't declared " \
+                 "idempotent: true"
+        existing.update!(status: "needs_review", error: { "reason" => reason })
+        # pause!, not leaving status at "running": otherwise Run.where(status: "running")
+        # can't distinguish a run legitimately executing from one silently stuck on a
+        # human. Run#pause! already exists (running -> paused) for exactly this shape
+        # of "stopped, not failed, waiting on something external."
+        @run.pause!
+        raise Error, "#{reason} - flagged needs_review; the run is paused until a human resolves it"
       end
 
       def unsafe_to_rerun_error(step_run, existing)
         Error.new(
           "belay_steps##{existing.id} at position #{step_run.position} is #{existing.status.inspect} - " \
-          "re-running it isn't safe without the needs_review policy, which doesn't exist yet"
+          "re-running it isn't safe. needs_review means a human needs to resolve it first (no resolve-and-" \
+          "resume action exists yet - that's dashboard work, Phase 2); skipped isn't produced by anything yet"
         )
       end
 

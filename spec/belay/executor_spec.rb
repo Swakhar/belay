@@ -303,7 +303,7 @@ RSpec.describe Belay::Executor do
     end
   end
 
-  describe "idempotent: and an orphaned started row" do
+  describe "idempotent:, an orphaned started row, and needs_review" do
     def simulate_crashed_step(run)
       Belay::Step.create!(
         run: run, position: 0, name: "extract", kind: "decision", status: "started",
@@ -311,7 +311,7 @@ RSpec.describe Belay::Executor do
       )
     end
 
-    it "raises rather than automatically retrying a non-idempotent orphaned started row" do
+    it "flags a non-idempotent orphaned started row needs_review, with a reason, and stops the run" do
       stub_const("ExecutorSpecNonIdempotentWorkflow", Class.new(Belay::Workflow) do
         input :invoice_id
         step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } } # no idempotent: true
@@ -322,9 +322,12 @@ RSpec.describe Belay::Executor do
       expect { described_class.new(run).call }
         .to raise_error(Belay::Error, /#{step.id}.*position 0.*crash.*extract.*idempotent: true/)
 
-      # Nothing retried: still exactly the one started row, untouched.
+      # Nothing retried: still exactly the one row, now flagged rather than left started.
       expect(run.steps.where(position: 0).count).to eq(1)
-      expect(run.steps.find_by(position: 0).status).to eq("started")
+      step.reload
+      expect(step.status).to eq("needs_review")
+      expect(step.error["reason"]).to match(/#{step.id}.*position 0.*crash.*extract.*idempotent: true/)
+      expect(run.reload.status).to eq("paused") # not failed/cancelled, and distinguishable from still-running
     end
 
     it "treats idempotent: \"false\" (a string, not the boolean) as NOT idempotent, not as truthy" do
@@ -336,6 +339,24 @@ RSpec.describe Belay::Executor do
       simulate_crashed_step(run)
 
       expect { described_class.new(run).call }.to raise_error(Belay::Error, /idempotent: true/)
+      expect(run.steps.find_by(position: 0).status).to eq("needs_review")
+    end
+
+    it "raises rather than silently re-processing a step already flagged needs_review on a later resume" do
+      stub_const("ExecutorSpecAlreadyNeedsReviewWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      end)
+      run = build_run(workflow_class: ExecutorSpecAlreadyNeedsReviewWorkflow)
+      simulate_crashed_step(run)
+      begin
+        described_class.new(run).call # flags needs_review, raises
+      rescue Belay::Error
+        nil
+      end
+
+      expect { described_class.new(run).call }
+        .to raise_error(Belay::Error, /position 0 is "needs_review"/)
     end
 
     it "does not require idempotent: true for a step's normal first execution - only for resuming a crash" do

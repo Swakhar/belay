@@ -13,6 +13,10 @@ module Belay
       def create_belay_runs_migration
         migration_template "create_belay_runs.rb.tt", "db/migrate/create_belay_runs.rb"
       end
+
+      def create_belay_steps_migration
+        migration_template "create_belay_steps.rb.tt", "db/migrate/create_belay_steps.rb"
+      end
     end
   end
 end

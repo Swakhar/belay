@@ -1,0 +1,33 @@
+class CreateBelaySteps < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def change
+    create_table :belay_steps, id: :uuid do |t|
+      t.uuid :run_id, null: false
+      t.integer :position, null: false
+      t.string :name, null: false
+      t.string :kind, null: false
+      t.string :status, null: false, default: "started"
+      t.jsonb :input
+      t.jsonb :output
+      t.string :provider
+      t.string :model
+      t.integer :input_tokens
+      t.integer :output_tokens
+      t.integer :cost_cents
+      t.integer :latency_ms
+      t.integer :attempt, null: false, default: 1
+      # Derived from run_id + position only (not attempt) so a retry of the same step
+      # presents the same key to an external API. See DESIGN_DECISIONS.md #3.
+      t.string :idempotency_key, null: false
+      t.jsonb :error
+
+      t.timestamps
+    end
+
+    add_foreign_key :belay_steps, :belay_runs, column: :run_id
+
+    # The full history of attempts is kept (one row per attempt); this is what
+    # uniquely identifies a row, not a candidate key for the idempotency_key column
+    # above, which repeats across attempts by design.
+    add_index :belay_steps, [:run_id, :position, :attempt], unique: true
+  end
+end

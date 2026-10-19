@@ -26,7 +26,7 @@ rails generate belay:install
 rails db:migrate
 ```
 
-This is implemented, but incomplete: the generator currently creates only the `belay_runs` migration. `belay_steps` is the next piece landing, so running `db:migrate` today does not yet give you a usable schema.
+This creates the `belay_runs` and `belay_steps` migrations and is implemented. The models, DSL and executor that actually use these tables are not — see Target API, below.
 
 ## Configuration
 

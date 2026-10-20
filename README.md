@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented — the "boring," no-gate path of the Target API below actually runs. Not yet implemented: `gate`, `pending_gate`, `approve!`/`reject!` (Phase 2) — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
+**Status:** pre-release, Phase 1 (core runtime) complete as of `v0.1.0.pre1`. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13) — the "boring," no-gate path of the Target API below actually runs. Not yet implemented: `gate`, `pending_gate`, `approve!`/`reject!` (Phase 2) — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
 
 ## Installation
 

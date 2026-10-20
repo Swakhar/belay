@@ -2,7 +2,7 @@
 
 No dates. Ordered by dependency, not priority.
 
-- **Core runtime** — workflow DSL, executor, checkpointing, leases and janitor, retries, Anthropic and fake providers, ActiveJob integration. *In progress.*
+- **Core runtime** — workflow DSL, executor, checkpointing, leases and janitor, retries, Anthropic and fake providers, ActiveJob integration. *Done (`v0.1.0.pre1`).*
 - **Gates and dashboard** — human approval steps, and a mountable engine showing runs, step timelines, tokens and cost.
 - **Replay** — re-run a recorded run against a different model or prompt and diff the outputs.
 - **Cost reduction** — opt-in response cache for decision steps, plus learned rules checked before any provider call.

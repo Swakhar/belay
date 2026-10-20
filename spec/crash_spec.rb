@@ -9,11 +9,12 @@ require_relative "support/crash_test_workflow"
 # methodology against a hardcoded three-step executor in a throwaway app. This spec
 # re-runs it against the real gem: a genuinely separate OS process is SIGKILLed mid-
 # step (after its "started" row commits, before anything catches an exception for
-# it), and a second process resumes the same run. :real_process (see spec_helper.rb)
-# opts these examples out of the per-example rollback wrapper every other spec gets -
-# the child process's own connection can only see what this process actually
-# committed, so rows have to be real, and these examples clean up their own.
-RSpec.describe "crash and resume", :real_process do
+# it), and a second process resumes the same run. :real_connections (see
+# spec_helper.rb) opts these examples out of the per-example rollback wrapper every
+# other spec gets - the child process's own connection can only see what this
+# process actually committed, so rows have to be real, and these examples clean up
+# their own.
+RSpec.describe "crash and resume", :real_connections do
   def runner_path
     File.expand_path("support/crash_test_runner.rb", __dir__)
   end

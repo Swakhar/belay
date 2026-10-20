@@ -67,10 +67,10 @@ module Belay
       # A step declared without kind: (every current README Target API example) can't
       # be written to belay_steps as-is - kind is NOT NULL with no DB default, unlike
       # status. "decision" is the generic catch-all of the four enum values for a step
-      # that's plain Ruby, not specifically an llm_call/tool_call/gate. Inferring a
-      # real kind from what a step's block actually does is executor work for later
-      # (Phase 1g, once there's an llm helper whose use could signal "this one's an
-      # llm_call").
+      # that's plain Ruby, not specifically an llm_call/tool_call/gate. Written at
+      # start_checkpoint! time, before the block has run - run_attempt below upgrades
+      # it to "llm_call" after the fact if the block actually called ctx.llm and the
+      # author never declared kind: explicitly (an explicit kind: is never overridden).
       DEFAULT_KIND = "decision"
 
       # What one step's execution needs, bundled so passing it around doesn't mean a
@@ -183,14 +183,28 @@ module Belay
 
       # One attempt: run the block, checkpoint the result. Returns [output, nil] on
       # success or [nil, error] on failure - never raises itself, so the retry loop
-      # above decides whether to try again or propagate.
+      # above decides whether to try again or propagate. context is built before the
+      # risky call so the rescue clause can still reach its llm_metadata - ctx.llm
+      # may have already made a real, billed provider call before the block went on
+      # to raise for an unrelated reason; that cost is recorded on the failed row
+      # too, not dropped.
       def run_attempt(step_run, step)
-        output = step_run.step_definition.block.call(build_context(step_run))
-        step.update!(status: "succeeded", output: output)
+        context = build_context(step_run)
+        output = step_run.step_definition.block.call(context)
+        step.update!(status: "succeeded", output: output, **extra_step_attrs(step_run, context))
         [output, nil]
       rescue StandardError => e
-        step.update!(status: "failed", error: { "class" => e.class.name, "message" => e.message })
+        step.update!(status: "failed", error: { "class" => e.class.name, "message" => e.message },
+                     **extra_step_attrs(step_run, context))
         [nil, e]
+      end
+
+      def extra_step_attrs(step_run, context)
+        return {} if context.nil?
+
+        attrs = context.llm_metadata
+        attrs = attrs.merge(kind: "llm_call") if step_run.step_definition.kind.nil? && !attrs.empty?
+        attrs
       end
 
       def build_context(step_run)

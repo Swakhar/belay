@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json_schemer"
+
 module Belay
   # Passed as `ctx` to a step block (see README's Target API). Exposes the run's input
   # and prior steps' outputs as dotted method calls - ctx.invoice_id, ctx.extract - built
@@ -18,14 +20,75 @@ module Belay
   # decided yet, and deep-freezing arbitrary step output is real added cost to pay for
   # a risk that depends on that undecided design.
   class Context
+    # Raised when schema: was given to ctx.llm but the provider's response doesn't
+    # match it. errors is JSONSchemer's own list of validation error hashes, not a
+    # single summarized string, so a caller can inspect exactly what failed.
+    class SchemaValidationError < Error
+      attr_reader :errors
+
+      def initialize(errors:, content:, schema:)
+        @errors = errors
+        messages = errors.map { |e| e["error"] }.join("; ")
+        super("ctx.llm's response did not match schema: #{messages} (content: #{content.inspect}, " \
+              "schema: #{schema.inspect})")
+      end
+    end
+
     attr_reader :input, :outputs, :step_idempotency_key
 
     def initialize(input: {}, outputs: {}, step_idempotency_key: nil)
       @input = symbolize_without_collision!(input, "input")
       @outputs = symbolize_without_collision!(outputs, "prior step output")
       @step_idempotency_key = step_idempotency_key
+      # Mutated in place by #llm below, not reassigned - this object freezes itself
+      # at the end of #initialize, which would make `@llm_metadata = ...` raise
+      # FrozenError from inside #llm. Mutating the Hash this ivar already points to
+      # is a different, allowed thing: freezing Context doesn't freeze objects it
+      # merely references.
+      @llm_metadata = {}
       validate_no_name_collisions!
       freeze
+    end
+
+    # Calls Belay.config.provider, validates the response against schema: (if given)
+    # with JSONSchemer, and returns response.content - a step block's return value
+    # becomes its checkpointed output, so #llm's return value IS the step's output,
+    # not a wrapper around it.
+    #
+    # Validated here, provider-agnostically, rather than inside each Provider:
+    # AnthropicProvider's own schema: already asks Anthropic's API to constrain its
+    # output, but FakeProvider enforces nothing at all - without this, a spec's
+    # scripted response could silently not match the schema: it claims to, and
+    # nothing would catch that until production. This is the one place that's true
+    # for every provider.
+    #
+    # schema: must use string keys for its own keywords (symbol-keyed schemas are
+    # deep-stringified below first) and set additionalProperties: false on every
+    # object, per Anthropic's own requirement for the same schema when a provider
+    # like AnthropicProvider forwards it as output_config.format.schema.
+    def llm(model:, prompt:, schema: nil)
+      provider = resolve_provider!
+      response = provider.call(model: model, prompt: prompt, schema: schema)
+
+      # Recorded before validating, not after: provider.call above already made a
+      # real, billed request by the time we know whether its content matches
+      # schema:. A response that fails validation raises below and this step's
+      # row ends up "failed" - run_attempt's dual-merge (see executor.rb) persists
+      # whatever's in @llm_metadata onto that failed row regardless, which only
+      # works if the merge already happened before the raise, not after it.
+      fields = response.to_h.slice(:model, :input_tokens, :output_tokens, :cost_cents, :latency_ms)
+      @llm_metadata.merge!(provider: provider.class.name, **fields)
+
+      validate_against_schema!(response.content, schema) if schema
+      response.content
+    end
+
+    # {} if #llm was never called this step - nothing to persist onto the step row,
+    # same as any step that made no provider call. Frozen dup, same reasoning as
+    # Workflow#steps/#inputs and FakeProvider#calls: a caller reaching in and
+    # mutating this would corrupt what StepRunner later reads to update the row.
+    def llm_metadata
+      @llm_metadata.dup.freeze
     end
 
     def method_missing(name, *args)
@@ -45,6 +108,41 @@ module Belay
     end
 
     private
+
+    def resolve_provider!
+      Belay.config.provider || raise(Error, "Belay.config.provider is not set - configure one before calling " \
+                                            "ctx.llm, e.g. Belay.configure { |c| c.provider = " \
+                                            "Belay::AnthropicProvider.new }")
+    end
+
+    def validate_against_schema!(content, schema)
+      document = json_normalize(content)
+      schemer = JSONSchemer.schema(json_normalize(schema))
+      return if schemer.valid?(document)
+
+      raise SchemaValidationError.new(errors: schemer.validate(document).to_a, content: content, schema: schema)
+    end
+
+    # Hash#deep_stringify_keys only converts hash keys, not a bare Symbol used as a
+    # VALUE - required: [:total_cents] (a real, common JSON Schema shape, not an
+    # edge case) comes through untouched, so "total_cents" (the stringified
+    # document's actual key) never matches :total_cents. JSON itself has no symbol
+    # type; normalizing every symbol anywhere in the structure, key or value, is
+    # what makes a Ruby-idiomatic symbol-keyed/valued schema or FakeProvider script
+    # behave the same as what the real API actually returns (plain JSON.parse'd
+    # strings throughout).
+    def json_normalize(value)
+      case value
+      when Hash
+        value.to_h { |k, v| [k.to_s, json_normalize(v)] }
+      when Array
+        value.map { |v| json_normalize(v) }
+      when Symbol
+        value.to_s
+      else
+        value
+      end
+    end
 
     def validate_no_name_collisions!
       name_overlap = @input.keys & @outputs.keys

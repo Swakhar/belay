@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), and `Belay::AnthropicProvider` are implemented — the "boring," no-gate path of the Target API below actually runs. Not yet implemented: `gate`, `pending_gate`, `approve!`/`reject!` (Phase 2), and the `llm` helper (Phase 1g) that would call a provider for you — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
+**Status:** pre-release. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented — the "boring," no-gate path of the Target API below actually runs. Not yet implemented: `gate`, `pending_gate`, `approve!`/`reject!` (Phase 2) — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
 
 ## Installation
 
@@ -35,10 +35,11 @@ This creates the `belay_runs` and `belay_steps` migrations, and is implemented, 
 Belay.configure do |config|
   config.lease_duration = 300     # seconds a worker holds a run before the janitor reclaims it
   config.heartbeat_interval = 30  # seconds between heartbeats while a step is in flight
+  config.provider = Belay::AnthropicProvider.new # the provider ctx.llm calls
 end
 ```
 
-Both settings default to the values above; the initializer is only needed to change them. `lease_duration` is read by `Run#acquire_lease!`/`#heartbeat_lease!` and `JanitorJob`; `heartbeat_interval` is how often a caller is expected to heartbeat (nothing currently heartbeats automatically mid-step - see `lib/belay/resume_run_job.rb`'s and `lib/belay/janitor_job.rb`'s comments for the gap this leaves for a step slower than `lease_duration`).
+`lease_duration`/`heartbeat_interval` default to the values above; the initializer is only needed to change them. `lease_duration` is read by `Run#acquire_lease!`/`#heartbeat_lease!` and `JanitorJob`; `heartbeat_interval` is how often a caller is expected to heartbeat (nothing currently heartbeats automatically mid-step - see `lib/belay/resume_run_job.rb`'s and `lib/belay/janitor_job.rb`'s comments for the gap this leaves for a step slower than `lease_duration`). `provider` defaults to `nil` - a workflow with no `ctx.llm`-calling steps never needs it, but calling `ctx.llm` without configuring one raises a clear error.
 
 ## Target API
 
@@ -47,8 +48,9 @@ class InvoiceWorkflow < Belay::Workflow
   input :invoice_id
 
   step :extract do |ctx|
-    llm( # not yet implemented - the llm helper and a real provider are Phase 1g
-      model: "claude-sonnet-4-6",
+    ctx.llm( # llm() on its own, as the spec sketch originally had it, is not how this
+             # ended up implemented - see the note below the example
+      model: "claude-sonnet-5-5",
       prompt: Prompts.extract(ctx.invoice.raw_text),
       schema: InvoiceSchema
     )
@@ -76,23 +78,26 @@ run.approve!(by: current_user) # not yet implemented - Phase 2
 
 A step is never re-executed once its output is checkpointed. A step's block raising is caught, marked failed with the error recorded, and retried up to `retries:` times before propagating. A step orphaned by a crash (found `started`, no exception ever caught) is resumed automatically only if declared `idempotent: true`; otherwise it's flagged `needs_review`, the run is paused, and the step's own block never runs again until a human resolves it (no resolve action exists yet - that's part of the Phase 2 dashboard). See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for the delivery guarantee (at-least-once, exactly-once only for idempotent steps) and the reasoning behind the rest of the design.
 
-## Calling Anthropic directly (until the `llm` helper lands)
+## ctx.llm
 
-`Belay::AnthropicProvider` calls Anthropic's Messages API directly (stdlib `Net::HTTP`, no extra gem dependency) and returns a `Belay::ProviderResponse`. There's no `llm` helper wiring this into `step` yet (Phase 1g), so call it yourself inside a step for now:
+`ctx.llm(model:, prompt:, schema: nil)` calls `Belay.config.provider` (configure one first, e.g. `Belay::AnthropicProvider.new` - see Configuration above) and returns `response.content` directly - that return value becomes the step's own checkpointed output, so `step :extract do |ctx| ctx.llm(...) end` needs nothing further.
+
+It's `ctx.llm`, not a bare top-level `llm(...)` the way an earlier sketch of this API had it. A step's block runs via plain `.call`, not `instance_exec`, so a bare `llm(...)` would need to be a class-level method every `Workflow` subclass inherits, with no explicit per-step state - which is exactly the kind of implicit ambient context (`Thread.current`-style, or an `ActiveSupport::CurrentAttributes`-alike) `ctx` already exists to avoid. Routing it through `ctx`, which every step block already receives explicitly, needed no new state and no class-level DSL method.
+
+Two things `ctx.llm` does that calling a provider directly does not:
+
+- **Validates `response.content` against `schema:`** (via [json_schemer](https://github.com/davishmcclurg/json_schemer)), provider-agnostically. `AnthropicProvider`'s own `schema:` already asks Anthropic's API to constrain its output, but `FakeProvider` enforces nothing at all - this is the one place that's true no matter which provider is configured, so a spec's scripted response that doesn't actually match the `schema:` it claims to fails loudly, in the test, not silently until production. `schema:` may use symbol or string keys/values either way (both are normalized the same before validating); `response.content` is returned to the step exactly as the provider gave it, never mutated by this normalization.
+- **Records `provider`/`model`/`input_tokens`/`output_tokens`/`cost_cents`/`latency_ms` onto the step's own `belay_steps` row** once the step finishes (success or failure - a provider call that happened before the block went on to raise is still a real, billed call, and isn't dropped). A step whose `kind:` wasn't declared explicitly is upgraded from the `"decision"` default to `"llm_call"` once it's known the block actually called `ctx.llm`; an explicit `kind:` is never overridden.
 
 ```ruby
 provider = Belay::AnthropicProvider.new(
   api_key: Rails.application.credentials.anthropic_api_key, # or ENV["ANTHROPIC_API_KEY"] by default
   pricing: { "claude-sonnet-5-5" => { input_per_million: 3.0, output_per_million: 15.0 } } # optional; cost_cents is nil without it
 )
-
-step :extract do |ctx|
-  response = provider.call(model: "claude-sonnet-5-5", prompt: Prompts.extract(ctx.invoice.raw_text), schema: InvoiceSchema)
-  response.content # Hash matching schema when schema: is given (Anthropic's structured outputs), String otherwise
-end
+Belay.configure { |config| config.provider = provider }
 ```
 
-`InvoiceSchema` must set `additionalProperties: false` on every object in the schema - Anthropic's own requirement for structured outputs. `pricing:` is deliberately not pre-filled with Anthropic's current rates - they change, and a stale hardcoded number is worse than an honest `nil`. `response.cost_cents` is `nil` for any model you haven't priced.
+`InvoiceSchema` must set `additionalProperties: false` on every object in the schema, if it's ever run against `AnthropicProvider` - Anthropic's own requirement for structured outputs. `pricing:` is deliberately not pre-filled with Anthropic's current rates - they change, and a stale hardcoded number is worse than an honest `nil`. `response.cost_cents` is `nil` for any model you haven't priced.
 
 ## Roadmap
 

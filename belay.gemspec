@@ -24,6 +24,12 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "activejob", ">= 7.1", "< 9"
   spec.add_dependency "activerecord", ">= 7.1", "< 9"
+  # Validates ctx.llm's response against schema: - see lib/belay/context.rb for why
+  # this is the one new dependency the gem takes on: a correct JSON Schema validator
+  # is worth depending on rather than hand-rolling (unlike AnthropicProvider's own
+  # HTTP layer, this is a real spec with real edge cases to get wrong). Pure Ruby,
+  # no ActiveSupport/Rails coupling of its own.
+  spec.add_dependency "json_schemer", "~> 2.5"
   spec.add_dependency "pg", "~> 1.1"
   spec.add_dependency "railties", ">= 7.1", "< 9"
 end

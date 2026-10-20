@@ -11,12 +11,19 @@ RSpec.describe Belay::Configuration do
     expect(configuration.heartbeat_interval).to eq(30)
   end
 
+  it "defaults provider to nil" do
+    expect(configuration.provider).to be_nil
+  end
+
   it "allows overriding each setting" do
+    provider = Belay::FakeProvider.new
     configuration.lease_duration = 900
     configuration.heartbeat_interval = 60
+    configuration.provider = provider
 
     expect(configuration.lease_duration).to eq(900)
     expect(configuration.heartbeat_interval).to eq(60)
+    expect(configuration.provider).to equal(provider)
   end
 end
 

@@ -60,6 +60,88 @@ RSpec.describe Belay::Executor do
     expect(steps["book"].kind).to eq("tool_call")
   end
 
+  describe "ctx.llm" do
+    after { Belay.reset_config! }
+
+    it "persists provider, model, tokens, cost and latency onto the step row after a successful call" do
+      response = Belay::ProviderResponse.new(content: "ok", model: "claude-sonnet-5-5", input_tokens: 10,
+                                             output_tokens: 5, cost_cents: 18, latency_ms: 420)
+      Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [response]) }
+      stub_const("LlmExecutorSpecWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:ask) { |ctx| ctx.llm(model: "claude-sonnet-5-5", prompt: "hi") }
+      end)
+      run = build_run(workflow_class: LlmExecutorSpecWorkflow)
+
+      described_class.new(run).call
+
+      step = run.steps.sole
+      expect(step).to have_attributes(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5",
+                                      input_tokens: 10, output_tokens: 5, cost_cents: 18, latency_ms: 420)
+    end
+
+    it "upgrades kind to llm_call when the step didn't declare one, but respects an explicit kind:" do
+      Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: %w[a b]) }
+      stub_const("LlmKindExecutorSpecWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:ask) { |ctx| ctx.llm(model: "x", prompt: "hi") }
+        step(:tag, kind: "tool_call") { |ctx| ctx.llm(model: "x", prompt: "hi") }
+      end)
+      run = build_run(workflow_class: LlmKindExecutorSpecWorkflow)
+
+      described_class.new(run).call
+
+      steps = run.steps.order(:position).index_by(&:name)
+      expect(steps["ask"].kind).to eq("llm_call")
+      expect(steps["tag"].kind).to eq("tool_call")
+    end
+
+    it "does not touch kind, provider or token columns for a step that never calls ctx.llm" do
+      run = build_run
+
+      described_class.new(run).call
+
+      step = run.steps.find_by(name: "extract")
+      expect(step).to have_attributes(kind: "decision", provider: nil, model: nil, input_tokens: nil,
+                                      output_tokens: nil, cost_cents: nil, latency_ms: nil)
+    end
+
+    it "persists llm_metadata even when the step block raises after a successful ctx.llm call" do
+      response = Belay::ProviderResponse.new(content: "ok", model: "claude-sonnet-5-5", cost_cents: 18)
+      Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [response]) }
+      stub_const("LlmFailsAfterExecutorSpecWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:ask) do |ctx|
+          ctx.llm(model: "x", prompt: "hi")
+          raise "boom after the billed call"
+        end
+      end)
+      run = build_run(workflow_class: LlmFailsAfterExecutorSpecWorkflow)
+
+      expect { described_class.new(run).call }.to raise_error("boom after the billed call")
+
+      step = run.steps.sole
+      expect(step).to have_attributes(status: "failed", cost_cents: 18, kind: "llm_call")
+    end
+
+    it "persists llm_metadata onto the failed row when schema: validation itself is what fails" do
+      response = Belay::ProviderResponse.new(content: { "total_cents" => "not an integer" }, model: "claude-sonnet-5-5",
+                                             cost_cents: 18)
+      Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [response]) }
+      schema = { type: "object", properties: { total_cents: { type: "integer" } }, required: [:total_cents] }
+      stub_const("LlmSchemaFailsExecutorSpecWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:ask) { |ctx| ctx.llm(model: "x", prompt: "hi", schema: schema) }
+      end)
+      run = build_run(workflow_class: LlmSchemaFailsExecutorSpecWorkflow)
+
+      expect { described_class.new(run).call }.to raise_error(Belay::Context::SchemaValidationError)
+
+      step = run.steps.sole
+      expect(step).to have_attributes(status: "failed", cost_cents: 18, model: "claude-sonnet-5-5", kind: "llm_call")
+    end
+  end
+
   it "writes a stable idempotency_key of run_id:position for each step" do
     run = build_run
 

@@ -95,4 +95,130 @@ RSpec.describe Belay::Context do
         .to raise_error(ArgumentError, /step_idempotency_key.*collide with an existing method/)
     end
   end
+
+  describe "#llm" do
+    after { Belay.reset_config! }
+
+    it "raises a clear error when Belay.config.provider is not set" do
+      ctx = described_class.new
+
+      expect { ctx.llm(model: "claude-sonnet-5-5", prompt: "hi") }
+        .to raise_error(Belay::Error, /Belay\.config\.provider is not set/)
+    end
+
+    it "calls the configured provider and returns its content" do
+      Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: ["the answer"]) }
+      ctx = described_class.new
+
+      expect(ctx.llm(model: "claude-sonnet-5-5", prompt: "what is the answer?")).to eq("the answer")
+    end
+
+    it "passes model, prompt and schema through to the provider verbatim" do
+      provider = Belay::FakeProvider.new(responses: [{ "total_cents" => 4200 }])
+      Belay.configure { |c| c.provider = provider }
+      ctx = described_class.new
+      schema = { type: "object", properties: { total_cents: { type: "integer" } } }
+
+      ctx.llm(model: "claude-sonnet-5-5", prompt: "extract", schema: schema)
+
+      expect(provider.calls.sole).to eq(model: "claude-sonnet-5-5", prompt: "extract", schema: schema)
+    end
+
+    describe "schema validation" do
+      let(:schema) do
+        { "type" => "object", "properties" => { "total_cents" => { "type" => "integer" } },
+          "required" => ["total_cents"] }
+      end
+
+      it "returns the content when it matches schema:" do
+        Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [{ "total_cents" => 4200 }]) }
+        ctx = described_class.new
+
+        expect(ctx.llm(model: "x", prompt: "extract", schema: schema)).to eq("total_cents" => 4200)
+      end
+
+      it "raises SchemaValidationError when the provider's content doesn't match schema:" do
+        Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [{ "total_cents" => "not an integer" }]) }
+        ctx = described_class.new
+
+        expect { ctx.llm(model: "x", prompt: "extract", schema: schema) }
+          .to raise_error(Belay::Context::SchemaValidationError, /total_cents/)
+      end
+
+      it "raises SchemaValidationError when a required field is missing" do
+        Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [{}]) }
+        ctx = described_class.new
+
+        expect { ctx.llm(model: "x", prompt: "extract", schema: schema) }.to raise_error(Belay::Context::SchemaValidationError)
+      end
+
+      it "records llm_metadata before raising, not after - a billed call that fails validation still isn't lost" do
+        response = Belay::ProviderResponse.new(content: {}, model: "claude-sonnet-5-5", cost_cents: 18)
+        Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [response]) }
+        ctx = described_class.new
+
+        expect { ctx.llm(model: "x", prompt: "extract", schema: schema) }.to raise_error(Belay::Context::SchemaValidationError)
+        expect(ctx.llm_metadata).to eq(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input_tokens: nil,
+                                       output_tokens: nil, cost_cents: 18, latency_ms: nil)
+      end
+
+      it "accepts a symbol-keyed schema, not just string-keyed" do
+        symbol_schema = { type: "object", properties: { total_cents: { type: "integer" } }, required: [:total_cents] }
+        Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [{ "total_cents" => 4200 }]) }
+        ctx = described_class.new
+
+        expect(ctx.llm(model: "x", prompt: "extract", schema: symbol_schema)).to eq("total_cents" => 4200)
+      end
+
+      it "validates a symbol-keyed content Hash against the schema, not just string-keyed" do
+        Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [{ total_cents: 4200 }]) }
+        ctx = described_class.new
+
+        expect(ctx.llm(model: "x", prompt: "extract", schema: schema)).to eq(total_cents: 4200)
+      end
+
+      it "does not validate at all when schema: is omitted" do
+        Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: ["not json at all"]) }
+        ctx = described_class.new
+
+        expect { ctx.llm(model: "x", prompt: "hi") }.not_to raise_error
+      end
+
+      it "exposes SchemaValidationError#errors as JSONSchemer's own validation error list" do
+        Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [{}]) }
+        ctx = described_class.new
+
+        begin
+          ctx.llm(model: "x", prompt: "extract", schema: schema)
+        rescue Belay::Context::SchemaValidationError => e
+          expect(e.errors).not_to be_empty
+          expect(e.errors).to all(be_a(Hash))
+        end
+      end
+    end
+  end
+
+  describe "#llm_metadata" do
+    after { Belay.reset_config! }
+
+    it "is {} before #llm has ever been called" do
+      expect(described_class.new.llm_metadata).to eq({})
+    end
+
+    it "records provider, model, tokens, cost and latency after a successful #llm call" do
+      response = Belay::ProviderResponse.new(content: "x", model: "claude-sonnet-5-5", input_tokens: 10,
+                                             output_tokens: 5, cost_cents: 18, latency_ms: 420)
+      Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [response]) }
+      ctx = described_class.new
+
+      ctx.llm(model: "claude-sonnet-5-5", prompt: "hi")
+
+      expect(ctx.llm_metadata).to eq(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input_tokens: 10,
+                                     output_tokens: 5, cost_cents: 18, latency_ms: 420)
+    end
+
+    it "returns a frozen Hash, so a caller can't corrupt what the executor later reads" do
+      expect(described_class.new.llm_metadata).to be_frozen
+    end
+  end
 end

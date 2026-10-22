@@ -17,6 +17,14 @@ module Belay
       def create_belay_steps_migration
         migration_template "create_belay_steps.rb.tt", "db/migrate/create_belay_steps.rb"
       end
+
+      # Last: belay_approvals FKs into both belay_runs and belay_steps, so its
+      # migration needs a timestamp after both of theirs - each migration_template
+      # call gets a fresh, later timestamp than the one before it, same reasoning
+      # that already orders steps after runs above.
+      def create_belay_approvals_migration
+        migration_template "create_belay_approvals.rb.tt", "db/migrate/create_belay_approvals.rb"
+      end
     end
   end
 end

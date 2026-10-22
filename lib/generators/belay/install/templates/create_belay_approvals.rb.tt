@@ -1,0 +1,43 @@
+class CreateBelayApprovals < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def change
+    create_table :belay_approvals, id: :uuid do |t|
+      t.uuid :run_id, null: false
+      # A direct FK to the specific gate's belay_steps row, not just a position
+      # column. run_id is kept alongside it too, even though it's already
+      # reachable via step.run_id (one join) - a different kind of
+      # denormalization than belay_steps' idempotency_key (a derived VALUE with
+      # no table to join to at all, kept stable across retries), just the plain
+      # avoid-a-join kind: a dashboard listing pending approvals across runs
+      # shouldn't need to join through steps first.
+      t.uuid :step_id, null: false
+      t.string :status, null: false, default: "pending"
+      t.string :decided_by
+      t.datetime :decided_at
+      # What a human edited before approving, if anything - feat(runs): support
+      # approve! with edited payload, a later commit. Added now, same as
+      # belay_steps' provider/model/token columns sat unused from Phase 1b until
+      # Phase 1g: one migration instead of two for columns whose shape is already
+      # known.
+      t.jsonb :edited_payload
+
+      t.timestamps
+    end
+
+    add_foreign_key :belay_approvals, :belay_runs, column: :run_id
+    add_foreign_key :belay_approvals, :belay_steps, column: :step_id
+
+    add_index :belay_approvals, :run_id
+    # One approval per gate step, enforced at the DB level - but this ASSUMES a
+    # true-condition gate settles into exactly one terminal belay_steps row per
+    # logical occurrence. That's not true yet: today's temporary when: true
+    # handling raises, which reuses the generic step retry loop (same as any
+    # step failure) - a gate declared with retries: N checkpoints N+1 separate
+    # attempt rows before the final raise, per the executor commit's own
+    # review. If the pause-on-gate commit creates an Approval per raise/attempt
+    # instead of exactly once per gate occurrence, THIS constraint breaks it.
+    # Whoever builds that commit: settle a true-condition gate once, not once
+    # per retry attempt, or revisit this index.
+    add_index :belay_approvals, :step_id, unique: true
+    add_index :belay_approvals, :status
+  end
+end

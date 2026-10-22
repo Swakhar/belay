@@ -1,3 +1,4 @@
 Belay::Engine.routes.draw do
-  root to: "home#index"
+  resources :runs, only: [:index]
+  root to: "runs#index"
 end

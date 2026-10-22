@@ -1,0 +1,28 @@
+<h1>Runs</h1>
+
+<%= form_with url: runs_path, method: :get, local: true do |f| %>
+  <%= f.select :status, options_for_select(@statuses, params[:status]), include_blank: "All statuses" %>
+  <%= f.select :workflow, options_for_select(@workflows, params[:workflow]), include_blank: "All workflows" %>
+  <%= f.submit "Filter" %>
+<% end %>
+
+<table>
+  <thead>
+    <tr>
+      <th>Workflow</th>
+      <th>Status</th>
+      <th>Started</th>
+      <th>Finished</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% @runs.each do |run| %>
+      <tr>
+        <td class="run-workflow"><%= run.workflow %></td>
+        <td class="run-status"><%= run.status %></td>
+        <td><%= run.started_at %></td>
+        <td><%= run.finished_at %></td>
+      </tr>
+    <% end %>
+  </tbody>
+</table>

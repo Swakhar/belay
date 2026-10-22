@@ -309,7 +309,7 @@ RSpec.describe Belay::Run do
       input :invoice_id
       step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
       gate(:approval, when: ->(_ctx) { true })
-      step(:book) { |_ctx| { booked: true } }
+      step(:book) { |ctx| { booked: true, approval_payload: ctx.approval } }
     end)
     run = described_class.create!(
       workflow: "RunSpecGateWorkflow", workflow_version: RunSpecGateWorkflow.workflow_version,
@@ -334,11 +334,26 @@ RSpec.describe Belay::Run do
       run.approve!(by: "reviewer@example.com")
 
       expect(gate.reload.status).to eq("succeeded")
+      expect(gate.output).to be_nil # no edited_payload given - same as today's behavior
       approval = gate.approval
       expect(approval.status).to eq("approved")
       expect(approval.decided_by).to eq("reviewer@example.com")
       expect(approval.decided_at).to be_present
+      expect(approval.edited_payload).to be_nil
       expect(run.reload.status).to eq("running")
+    end
+
+    it "uses edited_payload as the gate's own output, visible to later steps as ctx.<gate name>" do
+      run = build_paused_run
+
+      run.approve!(by: "reviewer@example.com", edited_payload: { total_cents: 999 })
+      Belay::ResumeRunJob.perform_now(run.id)
+
+      gate = run.steps.find_by(position: 1)
+      expect(gate.output).to eq("total_cents" => 999)
+      expect(run.approvals.sole.edited_payload).to eq("total_cents" => 999)
+      book = run.steps.find_by(position: 2)
+      expect(book.output).to eq("booked" => true, "approval_payload" => { "total_cents" => 999 })
     end
 
     it "leaves no pending_gate once approved" do
@@ -356,7 +371,7 @@ RSpec.describe Belay::Run do
       Belay::ResumeRunJob.perform_now(run.id)
 
       expect(run.reload.status).to eq("completed")
-      expect(run.steps.where(position: 2).sole.output).to eq("booked" => true)
+      expect(run.steps.where(position: 2).sole.output).to eq("booked" => true, "approval_payload" => nil)
     end
 
     it "raises a clean error, not a raw DB exception, when a racing call already decided this gate" do

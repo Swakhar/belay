@@ -159,13 +159,24 @@ module Belay
     # own transaction cleanly (the gate/run writes never ran) - rescued below
     # into the same kind of error a late pending_gate.nil? check would have
     # given a strictly-sequential second call, rather than a raw DB exception.
-    def approve!(by:)
-      gate = pending_gate
-      raise Error, "belay_runs##{id} has no pending gate to approve" if gate.nil?
+    #
+    # edited_payload:, if given, becomes the gate step's own output - a gate
+    # settled via evaluate_gate! never has one (only its status changes), so
+    # this is the first thing that gives one a real output. A step after the
+    # gate can read it back the same way it reads any other step's output:
+    # ctx.<gate name>. This is a deliberate, narrower choice than "edit the
+    # step the gate's when: actually depended on" - the DSL has no declared
+    # link between a gate and which step(s) fed its condition, so there's no
+    # single other row this could unambiguously override instead. Recorded on
+    # the Approval too (same value, different column) so a dashboard can show
+    # what was edited without reaching through the gate's own output.
+    def approve!(by:, edited_payload: nil)
+      gate = require_pending_gate!("approve")
 
       ActiveRecord::Base.transaction do
-        approvals.create!(step: gate, status: "approved", decided_by: by, decided_at: Time.current)
-        gate.update!(status: "succeeded")
+        approvals.create!(step: gate, status: "approved", decided_by: by, decided_at: Time.current,
+                          edited_payload: edited_payload)
+        gate.update!(status: "succeeded", output: edited_payload)
         resume!
       end
 
@@ -185,8 +196,7 @@ module Belay
     # with no rescue. Failing the run directly, synchronously, avoids ever taking
     # that path.
     def reject!(by:)
-      gate = pending_gate
-      raise Error, "belay_runs##{id} has no pending gate to reject" if gate.nil?
+      gate = require_pending_gate!("reject")
 
       reason = "gate :#{gate.name} rejected by #{by}"
       ActiveRecord::Base.transaction do
@@ -199,6 +209,16 @@ module Belay
     end
 
     private
+
+    # Shared by approve!/reject! - same "no pending gate" guard, worded for whichever
+    # verb the caller used, so a human reading the raised error sees the action they
+    # actually called, not a generic one.
+    def require_pending_gate!(action)
+      gate = pending_gate
+      raise Error, "belay_runs##{id} has no pending gate to #{action}" if gate.nil?
+
+      gate
+    end
 
     # Each bang method declares its own required source status(es), rather than checking
     # a target-reachability graph: "running" is a legal target from both "pending" (start!)

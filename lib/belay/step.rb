@@ -12,6 +12,11 @@ module Belay
     # instead of a raw DB NotNullViolation.
     belongs_to :run, class_name: "Belay::Run", optional: false
 
+    # has_one, not has_many: belay_approvals.step_id is unique at the DB level -
+    # at most one approval per gate step (see its migration's own comment on why,
+    # and the forward constraint that assumes).
+    has_one :approval, class_name: "Belay::Approval"
+
     enum :kind, {
       llm_call: "llm_call",
       tool_call: "tool_call",

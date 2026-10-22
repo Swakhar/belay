@@ -5,6 +5,7 @@ module Belay
     self.table_name = "belay_runs"
 
     has_many :steps, class_name: "Belay::Step"
+    has_many :approvals, class_name: "Belay::Approval"
 
     # validate: false (the default) raises ArgumentError immediately on an invalid value,
     # rather than deferring to a validation error at save time. Right for internal state

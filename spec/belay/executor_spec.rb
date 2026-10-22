@@ -612,11 +612,11 @@ RSpec.describe Belay::Executor do
       expect(run.steps.where(position: 1).count).to eq(1)
     end
 
-    it "raises a clear error resuming a run with an awaiting_approval gate - no approve!/reject! yet" do
+    it "raises a clear error resuming a run whose gate is still genuinely unresolved" do
       stub_const("ExecutorSpecGateResumeAwaitingWorkflow", gate_workflow(->(_ctx) { true }))
       run = build_run(workflow_class: ExecutorSpecGateResumeAwaitingWorkflow)
       described_class.new(run).call # pauses it
-      run.resume! # simulate a human having resumed the RUN itself without an Approval mechanism yet
+      run.resume! # simulate resuming the RUN directly, bypassing approve!/reject! entirely
 
       expect { described_class.new(run).call }
         .to raise_error(Belay::Error, %r{awaiting_approval.*approve!/reject!})

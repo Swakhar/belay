@@ -130,6 +130,74 @@ module Belay
       true
     end
 
+    # Approves this run's pending gate: records an approved Belay::Approval, settles
+    # the gate step "succeeded" (not "skipped" - that's reserved for when: false;
+    # this row's when: was true and a human signed off, a meaningfully different
+    # outcome worth distinguishing on the dashboard/audit trail), resumes the run,
+    # and enqueues ResumeRunJob to pick back up at the step right after the gate.
+    #
+    # by: is written as-is to decided_by (a plain string column) - ActiveRecord
+    # coerces it via #to_s, so passing a full User object stores its #to_s, not a
+    # useful identifier. Callers should pass something already meant to be read
+    # back later (an email, a username, an id) - this method doesn't guess which.
+    #
+    # All three writes - the Approval, the gate's own status, and resume! - are
+    # wrapped in one transaction, same reasoning as evaluate_gate!'s own fix: a
+    # crash between them must not leave a gate no longer awaiting_approval (so a
+    # second approve!/reject! would be guessing what already happened) while the
+    # run is still paused, or vice versa. If the process dies after this
+    # transaction commits but before ResumeRunJob.perform_later below enqueues,
+    # the run is left "running" with no lease - exactly what JanitorJob's
+    # stale-run query already reclaims (lib/belay/janitor_job.rb), so it isn't
+    # actually orphaned, just picked up a cycle late.
+    #
+    # pending_gate is checked once, in memory, before the transaction - not a
+    # row lock. Two callers racing to approve!/reject! the same gate (a double
+    # click, two reviewers) can both pass that check; the DB's unique index on
+    # belay_approvals.step_id is what actually decides it, and the loser's
+    # approvals.create! raises ActiveRecord::RecordNotUnique, rolling back its
+    # own transaction cleanly (the gate/run writes never ran) - rescued below
+    # into the same kind of error a late pending_gate.nil? check would have
+    # given a strictly-sequential second call, rather than a raw DB exception.
+    def approve!(by:)
+      gate = pending_gate
+      raise Error, "belay_runs##{id} has no pending gate to approve" if gate.nil?
+
+      ActiveRecord::Base.transaction do
+        approvals.create!(step: gate, status: "approved", decided_by: by, decided_at: Time.current)
+        gate.update!(status: "succeeded")
+        resume!
+      end
+
+      ResumeRunJob.perform_later(id)
+    rescue ActiveRecord::RecordNotUnique
+      raise Error, "belay_runs##{id}'s gate :#{gate.name} was already decided by another approve!/reject! call"
+    end
+
+    # Rejects this run's pending gate: records a rejected Belay::Approval, settles
+    # the gate step "failed" (there's no dedicated "rejected" Step status - a
+    # rejected gate IS a failed step, the same terminal shape any other step's
+    # unrecoverable failure takes), and fails the run outright. Unlike approve!,
+    # nothing is enqueued: a rejection has no step to resume into, so there's
+    # nothing for ResumeRunJob to do - re-entering the executor on a failed run
+    # would just hit the gate's own "failed" row and raise (dispatch's
+    # retry_or_raise, with max_attempts already exhausted), uncaught, inside a job
+    # with no rescue. Failing the run directly, synchronously, avoids ever taking
+    # that path.
+    def reject!(by:)
+      gate = pending_gate
+      raise Error, "belay_runs##{id} has no pending gate to reject" if gate.nil?
+
+      reason = "gate :#{gate.name} rejected by #{by}"
+      ActiveRecord::Base.transaction do
+        approvals.create!(step: gate, status: "rejected", decided_by: by, decided_at: Time.current)
+        gate.update!(status: "failed", error: { "reason" => reason })
+        fail!(error: { "reason" => reason })
+      end
+    rescue ActiveRecord::RecordNotUnique
+      raise Error, "belay_runs##{id}'s gate :#{gate.name} was already decided by another approve!/reject! call"
+    end
+
     private
 
     # Each bang method declares its own required source status(es), rather than checking

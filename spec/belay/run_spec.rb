@@ -298,4 +298,96 @@ RSpec.describe Belay::Run do
       expect(run.pending_gate).to eq(gate_step)
     end
   end
+
+  # Both methods below need a run genuinely paused on a gate (not just hand-built
+  # rows): build_paused_run runs InvoiceWorkflow-shaped gate for real, through the
+  # actual evaluate_gate! path, so these specs exercise approve!/reject! against the
+  # exact state that pausing a run for real leaves behind - same reasoning as
+  # executor_spec.rb's own gate specs.
+  def build_paused_run
+    stub_const("RunSpecGateWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      gate(:approval, when: ->(_ctx) { true })
+      step(:book) { |_ctx| { booked: true } }
+    end)
+    run = described_class.create!(
+      workflow: "RunSpecGateWorkflow", workflow_version: RunSpecGateWorkflow.workflow_version,
+      input: { invoice_id: 42 }
+    )
+    Belay::Executor.new(run).call
+    run.reload
+  end
+
+  describe "#approve!" do
+    it "raises if the run has no pending gate" do
+      run = build_run.tap(&:start!)
+
+      expect { run.approve!(by: "reviewer@example.com") }.to raise_error(Belay::Error, /no pending gate/)
+    end
+
+    it "settles the gate succeeded, records an approved Approval, resumes the run and enqueues ResumeRunJob" do
+      run = build_paused_run
+      gate = run.pending_gate
+      expect(Belay::ResumeRunJob).to receive(:perform_later).with(run.id)
+
+      run.approve!(by: "reviewer@example.com")
+
+      expect(gate.reload.status).to eq("succeeded")
+      approval = gate.approval
+      expect(approval.status).to eq("approved")
+      expect(approval.decided_by).to eq("reviewer@example.com")
+      expect(approval.decided_at).to be_present
+      expect(run.reload.status).to eq("running")
+    end
+
+    it "leaves no pending_gate once approved" do
+      run = build_paused_run
+
+      run.approve!(by: "reviewer@example.com")
+
+      expect(run.reload.pending_gate).to be_nil
+    end
+
+    it "actually resumes past the gate to the next step once the enqueued ResumeRunJob runs" do
+      run = build_paused_run
+      run.approve!(by: "reviewer@example.com")
+
+      Belay::ResumeRunJob.perform_now(run.id)
+
+      expect(run.reload.status).to eq("completed")
+      expect(run.steps.where(position: 2).sole.output).to eq("booked" => true)
+    end
+
+    it "raises a clean error, not a raw DB exception, when a racing call already decided this gate" do
+      run = build_paused_run
+      gate = run.pending_gate
+      Belay::Approval.create!(run: run, step: gate, status: "approved", decided_by: "someone-else")
+
+      expect { run.approve!(by: "reviewer@example.com") }
+        .to raise_error(Belay::Error, /already decided/)
+    end
+  end
+
+  describe "#reject!" do
+    it "raises if the run has no pending gate" do
+      run = build_run.tap(&:start!)
+
+      expect { run.reject!(by: "reviewer@example.com") }.to raise_error(Belay::Error, /no pending gate/)
+    end
+
+    it "settles the gate failed, records a rejected Approval and fails the run outright, without enqueuing anything" do
+      run = build_paused_run
+      gate = run.pending_gate
+      expect(Belay::ResumeRunJob).not_to receive(:perform_later)
+
+      run.reject!(by: "reviewer@example.com")
+
+      expect(gate.reload.status).to eq("failed")
+      approval = gate.approval
+      expect(approval.status).to eq("rejected")
+      expect(approval.decided_by).to eq("reviewer@example.com")
+      expect(run.reload.status).to eq("failed")
+    end
+  end
 end

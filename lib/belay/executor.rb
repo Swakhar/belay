@@ -108,10 +108,12 @@ module Belay
       # this can't resolve itself - re-running either would be guessing, same as a
       # freshly-flagged needs_review row would be if dispatch were called on it
       # again in the same process (it never is, today: flagging always raises
-      # right after, see flag_needs_review! below; a paused run's lease is already
-      # released and JanitorJob only ever looks at status: running, so nothing
-      # re-dispatches an awaiting_approval row either, outside a direct manual
-      # Executor.new(run).call - not implemented yet, see approve!/reject!).
+      # right after, see flag_needs_review! below). An awaiting_approval row is
+      # resolved the same way: Run#approve!/#reject! move it to succeeded/failed
+      # BEFORE the executor is ever invoked again, so dispatch here never actually
+      # sees "awaiting_approval" on a row a human has already acted on - this
+      # branch only fires if something re-dispatches the run while the gate is
+      # genuinely still unresolved.
       def dispatch(step_run, existing) # rubocop:disable Metrics/MethodLength, Metrics/AbcSize, Metrics/CyclomaticComplexity
         case existing&.status
         when nil
@@ -126,7 +128,7 @@ module Belay
           raise unsafe_to_rerun_error(step_run, existing)
         when "awaiting_approval"
           raise Error, "belay_steps##{existing.id} at position #{step_run.position} is awaiting_approval - " \
-                       "resolve it via run.approve!/reject! first (not implemented yet)"
+                       "resolve it via run.approve!/reject! first"
         else
           raise Error, "belay_steps##{existing.id} at position #{step_run.position} has unrecognized status " \
                        "#{existing.status.inspect} - refusing to guess what resuming it should do"

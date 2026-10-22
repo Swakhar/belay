@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release, Phase 1 (core runtime) complete as of `v0.1.0.pre1`. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13) — the "boring," no-gate path of the Target API below actually runs. Not yet implemented: `gate`, `pending_gate`, `approve!`/`reject!` (Phase 2) — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
+**Status:** pre-release, Phase 1 (core runtime) complete as of `v0.1.0.pre1`, Phase 2 (gates & dashboard) in progress. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13) — the "boring," no-gate path of the Target API below actually runs. `gate` can be declared (with `when:`) and participates in `workflow_version`, but the executor doesn't act on it yet - running a workflow that contains one today raises `NoMethodError` (a gate has no block, and the executor tries to call it like a step), leaving that step checkpointed `failed` and the run stuck `running`. Don't put a `gate` in a workflow you actually call `.start` on until the next commit lands. Not yet implemented: `pending_gate`, `approve!`/`reject!`, the dashboard (rest of Phase 2) — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
 
 ## Installation
 
@@ -61,7 +61,7 @@ class InvoiceWorkflow < Belay::Workflow
     Verifier.check_totals!(ctx.extract)
   end
 
-  gate :approval, when: ->(ctx) { ctx.extract[:total_cents] > 100_00 } # not yet implemented - Phase 2
+  gate :approval, when: ->(ctx) { ctx.extract[:total_cents] > 100_00 } # declared; raises NoMethodError if actually run - rest of Phase 2
 
   step :book, idempotent: true do |ctx|
     Bookkeeping.record!(ctx.extract, key: ctx.step_idempotency_key)
@@ -75,6 +75,8 @@ run.approve!(by: current_user) # not yet implemented - Phase 2
 ```
 
 `input`, `step` (including `retries:` and `kind:`), `workflow_version`, `.start` with idempotency_key deduplication, and `ctx.step_idempotency_key` are implemented, against the real checkpoint/resume mechanics below — not a stub.
+
+`gate(name, when:)` is implemented as a declaration: it's recorded in `workflow_version` (DESIGN_DECISIONS #7, "gates are steps" - a gate shares the same ordered list `step` does, not a separate one), and `when:` must respond to `#call`. The executor doesn't look at `kind: :gate` yet - it has no block, so running a workflow that contains one today raises `NoMethodError` the moment the executor reaches it, not a clean skip or pause. Declare gates freely; don't `.start` a workflow containing one until the next commit teaches the executor what `kind: :gate` means.
 
 A step is never re-executed once its output is checkpointed. A step's block raising is caught, marked failed with the error recorded, and retried up to `retries:` times before propagating. A step orphaned by a crash (found `started`, no exception ever caught) is resumed automatically only if declared `idempotent: true`; otherwise it's flagged `needs_review`, the run is paused, and the step's own block never runs again until a human resolves it (no resolve action exists yet - that's part of the Phase 2 dashboard). See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for the delivery guarantee (at-least-once, exactly-once only for idempotent steps - decision #2, proven against the real gem with real process kills and real concurrent workers by decision #13) and the reasoning behind the rest of the design.
 

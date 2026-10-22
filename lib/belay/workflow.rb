@@ -38,12 +38,40 @@ module Belay
         raise ArgumentError, "step :#{name} needs a block" unless block
 
         validate_step_kind!(name, kind)
-
-        name = name.to_sym
-        raise ArgumentError, "step :#{name} is already declared on #{self}" if raw_steps.any? { |s| s.name == name }
+        name = reserve_name!(name)
 
         raw_steps << StepDefinition.new(
           name: name, kind: kind&.to_sym, options: options.dup.freeze, block: block
+        ).freeze
+      end
+
+      # DESIGN_DECISIONS #7: "Gates are steps" - a gate lives in the same ordered
+      # raw_steps list as step (so Executor's single each_with_index walk sees it in
+      # position, and workflow_version's fingerprint already covers it via
+      # steps.map { [name, kind] }, with no special-casing needed there). kind: is
+      # always :gate here, not an option the caller can override - unlike step,
+      # where kind: is optional metadata, a gate's kind is what makes it one.
+      #
+      # when: is accepted through **options rather than declared as its own `when:`
+      # keyword parameter. Ruby accepts when: as a keyword argument NAME just fine
+      # (def gate(name, when:) parses), but referencing it afterward as a bare local
+      # variable does not - `when` alone is reserved for case/when, a SyntaxError
+      # distinct from the argument's own definition. Reading it back out of options
+      # (options[:when]) sidesteps that entirely rather than requiring
+      # binding.local_variable_get(:when) everywhere it's used.
+      #
+      # No block: a gate has nothing to execute - when: decides skip (false) or wait
+      # for a human (true). What the executor actually does with kind: :gate is the
+      # next commit's job; this one only declares it.
+      def gate(name, **options)
+        raise ArgumentError, "gate :#{name} must not pass kind: - a gate's kind is always :gate" if options.key?(:kind)
+
+        condition = options[:when]
+        validate_gate_when!(name, condition)
+        name = reserve_name!(name)
+
+        raw_steps << StepDefinition.new(
+          name: name, kind: :gate, options: options.dup.freeze, block: nil
         ).freeze
       end
 
@@ -149,6 +177,22 @@ module Belay
         return if kind.nil? || kind.is_a?(String) || kind.is_a?(Symbol)
 
         raise ArgumentError, "step :#{name} kind: must be a String, Symbol, or nil, got #{kind.inspect}"
+      end
+
+      def validate_gate_when!(name, condition)
+        return if condition.respond_to?(:call)
+
+        raise ArgumentError, "gate :#{name} needs when: (something that responds to #call), got #{condition.inspect}"
+      end
+
+      # Shared by step and gate: both end up in the same raw_steps list, walked by
+      # position, so a step and a gate with the same name collide with each other
+      # too, not just within their own kind.
+      def reserve_name!(name)
+        name = name.to_sym
+        return name unless raw_steps.any? { |s| s.name == name }
+
+        raise ArgumentError, "step/gate :#{name} is already declared on #{self}"
       end
     end
   end

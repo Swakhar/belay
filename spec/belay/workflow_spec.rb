@@ -63,6 +63,64 @@ RSpec.describe Belay::Workflow do
     end
   end
 
+  describe ".gate" do
+    it "raises when when: is missing" do
+      expect { workflow_class { gate :approval } }.to raise_error(ArgumentError, /approval.*needs when:/)
+    end
+
+    it "raises when when: doesn't respond to #call" do
+      expect { workflow_class { gate :approval, when: true } }.to raise_error(ArgumentError, /approval.*needs when:/)
+    end
+
+    it "records kind: :gate, not nil, with no block" do
+      klass = workflow_class { gate :approval, when: ->(ctx) { ctx.total > 100 } }
+
+      gate = klass.steps.first
+      expect(gate.kind).to eq(:gate)
+      expect(gate.block).to be_nil
+    end
+
+    it "captures when: inside options, callable later with a context argument" do
+      klass = workflow_class { gate :approval, when: ->(ctx) { ctx > 100 } }
+
+      expect(klass.steps.first.options[:when].call(150)).to be true
+    end
+
+    it "raises if kind: is also passed - a gate's kind is not the caller's to set" do
+      expect { workflow_class { gate :approval, when: -> { true }, kind: "tool_call" } }
+        .to raise_error(ArgumentError, /must not pass kind:/)
+    end
+
+    it "shares one ordered list with step - preserves declaration order across both" do
+      klass = workflow_class do
+        step(:extract) { |ctx| ctx }
+        gate(:approval, when: -> { true })
+        step(:book) { |ctx| ctx }
+      end
+
+      expect(klass.steps.map(&:name)).to eq(%i[extract approval book])
+      expect(klass.steps.map(&:kind)).to eq([nil, :gate, nil])
+    end
+
+    it "raises on a duplicate name shared with a step, not just with another gate" do
+      expect do
+        workflow_class do
+          step(:approval) { |ctx| ctx }
+          gate(:approval, when: -> { true })
+        end
+      end.to raise_error(ArgumentError, /approval.*already declared/)
+    end
+
+    it "raises on a duplicate gate name" do
+      expect do
+        workflow_class do
+          gate(:approval, when: -> { true })
+          gate(:approval, when: -> { true })
+        end
+      end.to raise_error(ArgumentError, /approval.*already declared/)
+    end
+  end
+
   it "keeps each subclass's declarations independent" do
     invoice = workflow_class { step(:extract) { |ctx| ctx } }
     refund = workflow_class { step(:validate) { |ctx| ctx } }
@@ -132,6 +190,20 @@ RSpec.describe Belay::Workflow do
       b = workflow_class { step(:extract, kind: :tool_call) { |ctx| ctx } }
 
       expect(a.workflow_version).not_to eq(b.workflow_version)
+    end
+
+    it "changes when a step becomes a gate of the same name - no special-casing needed, kind: already covers it" do
+      a = workflow_class { step(:approval) { |ctx| ctx } }
+      b = workflow_class { gate(:approval, when: -> { true }) }
+
+      expect(a.workflow_version).not_to eq(b.workflow_version)
+    end
+
+    it "does not change when only a gate's when: condition changes - not yet part of the fingerprint" do
+      a = workflow_class { gate(:approval, when: -> { true }) }
+      b = workflow_class { gate(:approval, when: -> { false }) }
+
+      expect(a.workflow_version).to eq(b.workflow_version)
     end
 
     it "changes when the order of two steps is swapped" do
@@ -297,6 +369,26 @@ RSpec.describe Belay::Workflow do
 
       expect(loser_result).to eq(winner)
       expect(Belay::Run.where(idempotency_key: "wf-race-1").count).to eq(1)
+    end
+
+    # Documents a known, temporary gap rather than leaving it an unverified claim:
+    # the executor doesn't understand kind: :gate yet (that's the next commit), so a
+    # gate has no block and the executor tries to call one anyway. This is NOT "no
+    # effect" - it's a crash, a step left checkpointed failed, and a run stuck
+    # running. Should start failing once the executor commit lands; when it does,
+    # replace this with real gate-skip/pause behavior instead of deleting it blind.
+    it "raises NoMethodError if a workflow with a gate is run - the executor doesn't support kind: :gate yet" do
+      klass = defined_workflow_class("WorkflowSpecGateNotYetSupported") do
+        input :invoice_id
+        gate(:approval, when: ->(_ctx) { true })
+      end
+
+      expect { klass.start(invoice_id: 42, idempotency_key: "wf-gate-1") }
+        .to raise_error(NoMethodError, /undefined method .call. for nil/)
+
+      run = Belay::Run.find_by(idempotency_key: "wf-gate-1")
+      expect(run.status).to eq("running") # never reaches complete! - the raise propagates out of Executor#call
+      expect(run.steps.sole.status).to eq("failed")
     end
   end
 

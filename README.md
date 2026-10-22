@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release, Phase 1 (core runtime) complete as of `v0.1.0.pre1`, Phase 2 (gates & dashboard) in progress. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13) — the "boring," no-gate path of the Target API below actually runs. `gate` is checkpointed correctly when its `when:` evaluates false (skipped, and the run continues past it); when `when:` evaluates true, it raises a clear "not implemented yet" error instead of silently proceeding, since pausing the run for a human is the next commit's job, not this one's. Not yet implemented: `pending_gate`, `approve!`/`reject!`, the dashboard (rest of Phase 2) — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
+**Status:** pre-release, Phase 1 (core runtime) complete as of `v0.1.0.pre1`, Phase 2 (gates & dashboard) in progress. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13) — the "boring," no-gate path of the Target API below actually runs. `gate` is checkpointed correctly either way now: `when:` false skips it and the run continues past it; `when:` true pauses the run (releasing its lease) and leaves the gate `awaiting_approval`, with `run.pending_gate` returning that step. Resolving a pending gate isn't implemented yet - `run.approve!`/`reject!` don't exist, so a paused run just stays paused. Not yet implemented: `approve!`/`reject!`, the dashboard (rest of Phase 2) — a run executes synchronously in the calling process today; nothing enqueues `ResumeRunJob` yet, so leases exist but aren't on the hot path until something does.
 
 ## Installation
 
@@ -61,7 +61,7 @@ class InvoiceWorkflow < Belay::Workflow
     Verifier.check_totals!(ctx.extract)
   end
 
-  gate :approval, when: ->(ctx) { ctx.extract[:total_cents] > 100_00 } # skip works; true raises - pausing is next
+  gate :approval, when: ->(ctx) { ctx.extract[:total_cents] > 100_00 } # true pauses; approve!/reject! aren't built
 
   step :book, idempotent: true do |ctx|
     Bookkeeping.record!(ctx.extract, key: ctx.step_idempotency_key)
@@ -69,14 +69,14 @@ class InvoiceWorkflow < Belay::Workflow
 end
 
 run = InvoiceWorkflow.start(invoice_id: 42, idempotency_key: "inv-42")
-run.status        # => "paused" once approve!/reject! exist; today, "completed" if every gate skipped
-run.pending_gate  # not yet implemented - Phase 2
+run.status        # => "paused" if the gate's when: was true; "completed" if every gate skipped
+run.pending_gate  # the awaiting_approval Belay::Step, or nil if nothing's paused on a gate
 run.approve!(by: current_user) # not yet implemented - Phase 2
 ```
 
 `input`, `step` (including `retries:` and `kind:`), `workflow_version`, `.start` with idempotency_key deduplication, and `ctx.step_idempotency_key` are implemented, against the real checkpoint/resume mechanics below — not a stub.
 
-`gate(name, when:)` is implemented against the real checkpoint/resume mechanics too, as far as it goes: `when:` is evaluated with the step's own context (prior outputs included), same as any step's block. False checkpoints the gate `skipped` (DESIGN_DECISIONS #7, "gates are steps" - a gate shares the same ordered list and resume/retry machinery `step` does, not a separate path) and the run continues past it; resuming a run that already has a skipped gate reuses that row without re-evaluating `when:`. True raises a clear "not implemented yet" error rather than silently proceeding - pausing the run for a human to approve is the next commit, not this one.
+`gate(name, when:)` is implemented against the real checkpoint/resume mechanics too: `when:` is evaluated with the step's own context (prior outputs included), same as any step's block. False checkpoints the gate `skipped` (DESIGN_DECISIONS #7, "gates are steps" - a gate shares the same ordered list and resume/retry machinery `step` does, not a separate path) and the run continues past it; resuming a run that already has a skipped gate reuses that row without re-evaluating `when:`. True checkpoints the gate `awaiting_approval`, pauses the run, releases its lease, and stops - no further steps run, and `run.pending_gate` finds that step. What's missing is resolving it: `approve!`/`reject!` don't exist yet, so a paused run just stays paused; calling `.start`/the executor again on it raises a clear error rather than guessing what a human would have decided.
 
 A step is never re-executed once its output is checkpointed. A step's block raising is caught, marked failed with the error recorded, and retried up to `retries:` times before propagating. A step orphaned by a crash (found `started`, no exception ever caught) is resumed automatically only if declared `idempotent: true`; otherwise it's flagged `needs_review`, the run is paused, and the step's own block never runs again until a human resolves it (no resolve action exists yet - that's part of the Phase 2 dashboard). See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for the delivery guarantee (at-least-once, exactly-once only for idempotent steps - decision #2, proven against the real gem with real process kills and real concurrent workers by decision #13) and the reasoning behind the rest of the design.
 

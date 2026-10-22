@@ -250,4 +250,52 @@ RSpec.describe Belay::Run do
       expect(run.lease_expires_at).to be_within(1.second).of(frozen_now + Belay.config.lease_duration)
     end
   end
+
+  describe "#release_lease!" do
+    it "clears lease_owner and lease_expires_at" do
+      run = build_run
+      run.acquire_lease!(owner: "worker-1", duration: 300)
+
+      result = run.release_lease!
+
+      expect(result).to be true
+      expect(run.lease_owner).to be_nil
+      expect(run.lease_expires_at).to be_nil
+      expect(run.reload.lease_owner).to be_nil
+    end
+
+    it "is unconditional, unlike acquire_lease!/heartbeat_lease! - clears even a lease it never held" do
+      run = build_run
+      run.acquire_lease!(owner: "someone-else", duration: 300)
+
+      run.release_lease!
+
+      expect(run.reload.lease_owner).to be_nil
+    end
+
+    it "is a no-op, not an error, on a run that was never leased at all" do
+      run = build_run
+
+      expect { run.release_lease! }.not_to raise_error
+      expect(run.lease_owner).to be_nil
+    end
+  end
+
+  describe "#pending_gate" do
+    it "returns nil when the run has no awaiting_approval step" do
+      run = build_run.tap(&:start!)
+      run.steps.create!(position: 0, name: "extract", kind: "decision", status: "succeeded",
+                        idempotency_key: "#{run.id}:0")
+
+      expect(run.pending_gate).to be_nil
+    end
+
+    it "returns the step awaiting_approval" do
+      run = build_run.tap(&:start!).tap(&:pause!)
+      gate_step = run.steps.create!(position: 0, name: "approval", kind: "gate", status: "awaiting_approval",
+                                    idempotency_key: "#{run.id}:0")
+
+      expect(run.pending_gate).to eq(gate_step)
+    end
+  end
 end

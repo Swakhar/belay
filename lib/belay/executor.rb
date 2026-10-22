@@ -12,17 +12,28 @@ module Belay
       @step_runner = StepRunner.new(run)
     end
 
+    # catch(:gate_paused), not a rescue: a gate whose when: evaluates true throws
+    # this tag (see StepRunner#evaluate_gate!) after already pausing the run and
+    # releasing its lease - a throw, not a raise, specifically so it unwinds past
+    # run_attempt's rescue StandardError untouched (throw/catch and raise/rescue
+    # are separate mechanisms in Ruby; no rescue clause anywhere in between ever
+    # sees it), skipping both the generic succeeded/failed checkpoint AND the
+    # complete! call below, with no further steps run.
     def call
       @run.start! if @run.pending?
       outputs = {}
 
-      workflow_class.steps.each_with_index do |step_definition, position|
-        outputs[step_definition.name] = @step_runner.run(step_definition, position, outputs)
+      catch(:gate_paused) do
+        workflow_class.steps.each_with_index do |step_definition, position|
+          outputs[step_definition.name] = @step_runner.run(step_definition, position, outputs)
+        end
+
+        # Guarded the same way start! is above: a second call on an already-
+        # completed run must be a clean no-op, not InvalidTransitionError on
+        # complete! -> complete!.
+        @run.complete! if @run.running?
       end
 
-      # Guarded the same way start! is above: a second call on an already-completed
-      # run must be a clean no-op, not InvalidTransitionError on complete! -> complete!.
-      @run.complete! if @run.running?
       @run
     end
 
@@ -90,14 +101,18 @@ module Belay
 
       private
 
-      # Step#status has five legal values. "succeeded" and "skipped" resume the same
-      # way - reuse the stored output, never re-evaluate (DESIGN_DECISIONS #7: a
-      # gate's when: is not re-run against whatever context resume happens to have).
-      # needs_review was left that way for a reason this can't evaluate yet -
-      # re-running it would be guessing, same as a freshly-flagged needs_review row
-      # would be if dispatch were called on it again in the same process (it never
-      # is, today: flagging always raises right after, see flag_needs_review! below).
-      def dispatch(step_run, existing) # rubocop:disable Metrics/MethodLength
+      # Step#status has six legal values now. "succeeded" and "skipped" resume the
+      # same way - reuse the stored output, never re-evaluate (DESIGN_DECISIONS #7:
+      # a gate's when: is not re-run against whatever context resume happens to
+      # have). needs_review/awaiting_approval were each left that way for a reason
+      # this can't resolve itself - re-running either would be guessing, same as a
+      # freshly-flagged needs_review row would be if dispatch were called on it
+      # again in the same process (it never is, today: flagging always raises
+      # right after, see flag_needs_review! below; a paused run's lease is already
+      # released and JanitorJob only ever looks at status: running, so nothing
+      # re-dispatches an awaiting_approval row either, outside a direct manual
+      # Executor.new(run).call - not implemented yet, see approve!/reject!).
+      def dispatch(step_run, existing) # rubocop:disable Metrics/MethodLength, Metrics/AbcSize, Metrics/CyclomaticComplexity
         case existing&.status
         when nil
           attempt_step(step_run, attempt: 1)
@@ -109,6 +124,9 @@ module Belay
           retry_or_raise(step_run, existing)
         when "needs_review"
           raise unsafe_to_rerun_error(step_run, existing)
+        when "awaiting_approval"
+          raise Error, "belay_steps##{existing.id} at position #{step_run.position} is awaiting_approval - " \
+                       "resolve it via run.approve!/reject! first (not implemented yet)"
         else
           raise Error, "belay_steps##{existing.id} at position #{step_run.position} has unrecognized status " \
                        "#{existing.status.inspect} - refusing to guess what resuming it should do"
@@ -202,11 +220,12 @@ module Belay
       # A gate reuses this same checkpoint/retry machinery rather than a separate
       # path: start_checkpoint! already writes kind: :gate correctly (it was never
       # nil, so DEFAULT_KIND never kicks in), and evaluate_gate! below stands in for
-      # block.call - its result settles the row exactly like a step's output would,
-      # just under status: "skipped" instead of "succeeded".
+      # block.call - when: false settles the row exactly like a step's output
+      # would, just under status: "skipped" instead of "succeeded". when: true
+      # takes a different exit entirely (throw, not return) - see evaluate_gate!.
       def run_attempt(step_run, step)
         context = build_context(step_run)
-        output = run_block(step_run, context)
+        output = run_block(step_run, context, step)
         step.update!(status: settled_status(step_run), output: output, **extra_step_attrs(step_run, context))
         [output, nil]
       rescue StandardError => e
@@ -215,8 +234,8 @@ module Belay
         [nil, e]
       end
 
-      def run_block(step_run, context)
-        return evaluate_gate!(step_run, context) if step_run.step_definition.kind == :gate
+      def run_block(step_run, context, step)
+        return evaluate_gate!(step_run, context, step) if step_run.step_definition.kind == :gate
 
         step_run.step_definition.block.call(context)
       end
@@ -225,28 +244,43 @@ module Belay
         step_run.step_definition.kind == :gate ? "skipped" : "succeeded"
       end
 
-      # when: true means a human should be asked before the run continues - not
-      # implemented yet (the next commit), so it raises here rather than silently
-      # passing through as if the gate were satisfied. Raising inside run_attempt's
-      # rescue reuses the same checkpoint-as-failed/retry machinery a step's own
-      # raise gets: the row records why, and resuming the run raises the same clear
-      # error again (via retry_or_raise) rather than resuming into unsupported
-      # behavior silently.
+      # when: false settles normally (returns nil, caller checkpoints "skipped").
+      # when: true pauses right here instead: this step's own row becomes
+      # "awaiting_approval" (not "succeeded", not "failed" - run_attempt's own
+      # checkpoint line below never runs, since throw skips straight past it, same
+      # as it skips the rescue), the run is paused and its lease released, then
+      # throw :gate_paused unwinds all the way up to Executor#call's catch,
+      # skipping every remaining step and the complete! call - cleanly, not via an
+      # exception any rescue StandardError could intercept or retry: could retry.
+      # That's the actual fix for the previous commit's documented retries: gap:
+      # there's no raise on this path anymore for retries: to apply to at all.
       #
-      # Reusing that machinery means retries: also applies to a gate exactly like it
-      # would to a step: gate(..., retries: 3, when: cond) re-calls cond N+1 times
-      # (once per attempt) before finally raising, same as a step's block would be
-      # re-run N+1 times. Harmless if when: is the pure predicate it's meant to be;
-      # worth knowing if an author's when: is ever NOT side-effect-free, since
-      # nothing here special-cases a gate to call it only once regardless of
-      # retries:.
-      def evaluate_gate!(step_run, context)
+      # The three writes below are wrapped in one transaction, and the throw
+      # happens AFTER it (not inside it): a process killed mid-transaction rolls
+      # back to the gate's original "started" row, which is the already-handled
+      # crash path (idempotent?/needs_review) - not a new, worse state. Without
+      # the transaction, a crash between step.update! and @run.pause! would leave
+      # the step "awaiting_approval" while the run stays "running": JanitorJob's
+      # own query (status: running, lease expired or none - today's realistic
+      # case, since inline Workflow.start never takes a lease at all) would pick
+      # that run back up and hand it to ResumeRunJob, which has no rescue around
+      # Executor.new(run).call - dispatch's awaiting_approval branch just raises,
+      # uncaught, forever, every lease cycle, and the run never reaches "paused"
+      # at all. Caught by review before this landed; keeping the throw outside the
+      # transaction block (rather than inside it) is deliberate too - a throw is
+      # not an exception, so it wouldn't trigger Rails' own rollback-on-exception
+      # path, but there's no reason to rely on that distinction when the simpler
+      # structure (commit first, throw after) removes the question entirely.
+      def evaluate_gate!(step_run, context, step)
         condition = step_run.step_definition.options[:when]
         return nil unless condition.call(context)
 
-        raise Error, "gate :#{step_run.step_definition.name} evaluated true - pausing a run for human " \
-                     "approval isn't implemented yet (the next commit); only when: false (skip) is " \
-                     "supported today"
+        ActiveRecord::Base.transaction do
+          step.update!(status: "awaiting_approval")
+          @run.pause!
+          @run.release_lease!
+        end
+        throw :gate_paused
       end
 
       def extra_step_attrs(step_run, context)

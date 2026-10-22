@@ -552,25 +552,74 @@ RSpec.describe Belay::Executor do
       # invoice_id: 200 -> extract's 200 * 100 = 20000 cents, well over the 10000 threshold
       run = build_run(workflow_class: ExecutorSpecGateContextWorkflow, input: { invoice_id: 200 })
 
-      # when: evaluated true here (20000 > 10000), which isn't supported yet - raises,
-      # same as the dedicated "evaluates true" test below. Confirms real ctx access
-      # (ctx.extract's actual value), not just a stubbed condition.
-      expect { described_class.new(run).call }.to raise_error(Belay::Error, /evaluated true/)
+      # when: evaluated true here (20000 > 10000) - pauses, same as the dedicated
+      # "evaluates true" test below. Confirms real ctx access (ctx.extract's
+      # actual value), not just a stubbed condition.
+      described_class.new(run).call
 
-      expect(run.steps.find_by(position: 1).status).to eq("failed")
+      expect(run.steps.find_by(position: 1).status).to eq("awaiting_approval")
       expect(run.steps.where(position: 2)).to be_empty
     end
 
-    it "raises a clear, not-yet-implemented error when when: evaluates true - pausing for a human isn't built yet" do
+    it "pauses the run, releases its lease, and leaves the gate awaiting_approval when when: evaluates true" do
       stub_const("ExecutorSpecGateTrueWorkflow", gate_workflow(->(_ctx) { true }))
       run = build_run(workflow_class: ExecutorSpecGateTrueWorkflow)
+      run.acquire_lease!(owner: "worker-1", duration: 300)
 
-      expect { described_class.new(run).call }
-        .to raise_error(Belay::Error, /approval.*evaluated true.*isn't implemented yet/)
+      result = described_class.new(run).call
+
+      expect(result).to eq(run) # returns cleanly - no raise, no exception to catch
+      gate_step = run.steps.find_by(position: 1)
+      expect(gate_step).to have_attributes(status: "awaiting_approval", kind: "gate")
+      expect(run.reload).to have_attributes(status: "paused", lease_owner: nil, lease_expires_at: nil)
+      expect(run.steps.where(position: 2)).to be_empty # :book never ran
+    end
+
+    it "rolls back the awaiting_approval write if pausing the run fails partway through" do
+      # Proves the transaction wrapping step.update! + pause! + release_lease! is
+      # real, not just asserted in a comment: without it, the step would already
+      # show awaiting_approval here even though pause! itself never committed. A
+      # real process kill mid-transaction (what the comment on evaluate_gate! is
+      # actually about) would leave the step at "started" with nothing else
+      # happening - this test uses an in-process exception instead, which is
+      # subtly different: run_attempt's own rescue is still running here (unlike a
+      # true crash), so it catches the re-raised transaction error and marks the
+      # step "failed" in a SEPARATE write right after the rollback - what matters
+      # for this test is that the "awaiting_approval" write never survives either way.
+      stub_const("ExecutorSpecGateTransactionWorkflow", gate_workflow(->(_ctx) { true }))
+      run = build_run(workflow_class: ExecutorSpecGateTransactionWorkflow)
+      allow(run).to receive(:pause!).and_raise("simulated error mid-transaction")
+
+      expect { described_class.new(run).call }.to raise_error("simulated error mid-transaction")
 
       gate_step = run.steps.find_by(position: 1)
-      expect(gate_step).to have_attributes(status: "failed", kind: "gate")
-      expect(run.reload.status).to eq("running") # never reaches complete! - the raise propagates out
+      expect(gate_step.status).to eq("failed") # run_attempt's rescue, not the rolled-back transaction
+      expect(gate_step.status).not_to eq("awaiting_approval") # the actual property under test
+      expect(run.reload.status).to eq("running") # pause! itself never actually committed
+    end
+
+    it "does not re-evaluate when: under retries: - pausing isn't a failure, so nothing retries it" do
+      calls = 0
+      stub_const("ExecutorSpecGateRetriesWorkflow", gate_workflow(lambda { |_ctx|
+        calls += 1
+        true
+      }, retries: 2))
+      run = build_run(workflow_class: ExecutorSpecGateRetriesWorkflow)
+
+      described_class.new(run).call
+
+      expect(calls).to eq(1) # exactly once - throw :gate_paused skips the retry loop entirely
+      expect(run.steps.where(position: 1).count).to eq(1)
+    end
+
+    it "raises a clear error resuming a run with an awaiting_approval gate - no approve!/reject! yet" do
+      stub_const("ExecutorSpecGateResumeAwaitingWorkflow", gate_workflow(->(_ctx) { true }))
+      run = build_run(workflow_class: ExecutorSpecGateResumeAwaitingWorkflow)
+      described_class.new(run).call # pauses it
+      run.resume! # simulate a human having resumed the RUN itself without an Approval mechanism yet
+
+      expect { described_class.new(run).call }
+        .to raise_error(Belay::Error, %r{awaiting_approval.*approve!/reject!})
     end
 
     it "resumes past an already-skipped gate without calling when: again" do
@@ -587,23 +636,6 @@ RSpec.describe Belay::Executor do
 
       expect(calls).to eq(0) # never invoked - the existing skipped row was reused as-is
       expect(run.reload.status).to eq("completed")
-    end
-
-    it "re-evaluates when: once per attempt under retries:, same as a step's block would be re-run" do
-      calls = 0
-      stub_const("ExecutorSpecGateRetriesWorkflow", gate_workflow(lambda { |_ctx|
-        calls += 1
-        true
-      }, retries: 2))
-      run = build_run(workflow_class: ExecutorSpecGateRetriesWorkflow)
-
-      expect { described_class.new(run).call }.to raise_error(Belay::Error, /evaluated true/)
-
-      # retries: 2 means 3 attempts total (1 + 2), each its own row, each re-calling
-      # when: - nothing here special-cases a gate to call it only once regardless of
-      # retries:, documented on evaluate_gate! in executor.rb.
-      expect(calls).to eq(3)
-      expect(run.steps.where(position: 1).count).to eq(3)
     end
   end
 

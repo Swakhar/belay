@@ -69,8 +69,8 @@ RSpec.describe Belay::Step do
   end
 
   describe "status enum" do
-    it "accepts each of the five declared statuses" do
-      %w[started succeeded failed skipped needs_review].each_with_index do |status, i|
+    it "accepts each of the six declared statuses" do
+      %w[started succeeded failed skipped needs_review awaiting_approval].each_with_index do |status, i|
         expect(build_step(position: i, status: status, idempotency_key: "k-#{status}").status).to eq(status)
       end
     end

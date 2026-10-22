@@ -53,6 +53,15 @@ module Belay
       transition!(from: %w[pending running paused], to: "cancelled", finished_at: Time.current)
     end
 
+    # At most one, by construction: Executor stops at the FIRST gate whose when:
+    # evaluates true (throw :gate_paused unwinds immediately, no further steps
+    # run), so a run can never have more than one step awaiting_approval at once.
+    # nil, not a raise, when there isn't one - that's the common case (most runs
+    # never pause on a gate at all), not an error condition.
+    def pending_gate
+      steps.awaiting_approval.first
+    end
+
     # DESIGN_DECISIONS #5: "a worker claims a run with a conditional UPDATE on
     # lease_owner/lease_expires_at." The condition - no owner yet, or the existing
     # lease has expired - is evaluated by Postgres in the same statement that claims
@@ -104,6 +113,20 @@ module Belay
       return false unless renewed == 1
 
       reload
+      true
+    end
+
+    # Unconditional, unlike acquire_lease!/heartbeat_lease! - both take an owner:
+    # and defend against racing another worker; this doesn't check who (if
+    # anyone) currently holds the lease. That's an honest limitation of what's
+    # wired up today, not a deliberate safety choice: Executor/StepRunner, the
+    # only caller so far (evaluate_gate!, pausing on a true gate), has no owner
+    # identity of its own to check against - it's constructed as
+    # Executor.new(run), with no owner: ever threaded through from whichever job
+    # (if any) called it. Revisit if that changes; for now this just clears
+    # whatever is there.
+    def release_lease! # rubocop:disable Naming/PredicateMethod
+      update!(lease_owner: nil, lease_expires_at: nil)
       true
     end
 

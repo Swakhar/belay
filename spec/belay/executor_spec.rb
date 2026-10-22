@@ -438,7 +438,7 @@ RSpec.describe Belay::Executor do
       end
 
       expect { described_class.new(run).call }
-        .to raise_error(Belay::Error, /position 0 is "needs_review"/)
+        .to raise_error(Belay::Error, /position 0 is needs_review/)
     end
 
     it "does not require idempotent: true for a step's normal first execution - only for resuming a crash" do
@@ -511,7 +511,7 @@ RSpec.describe Belay::Executor do
       expect(extract_rows.first.output).to eq("total_cents" => 4200)
     end
 
-    %w[failed skipped needs_review].each do |status|
+    %w[failed needs_review].each do |status|
       it "raises rather than silently re-running a step already left #{status}" do
         run = build_run
         step = Belay::Step.create!(
@@ -522,6 +522,88 @@ RSpec.describe Belay::Executor do
         expect { described_class.new(run).call }
           .to raise_error(Belay::Error, /#{step.id}.*position 0.*#{status}/)
       end
+    end
+  end
+
+  describe "gates" do
+    def gate_workflow(condition, **gate_options)
+      Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+        gate(:approval, when: condition, **gate_options)
+        step(:book) { |_ctx| "booked" }
+      end
+    end
+
+    it "checkpoints a gate as skipped when: false, with no output, and the run completes past it" do
+      stub_const("ExecutorSpecGateFalseWorkflow", gate_workflow(->(_ctx) { false }))
+      run = build_run(workflow_class: ExecutorSpecGateFalseWorkflow)
+
+      described_class.new(run).call
+
+      gate_step = run.steps.find_by(position: 1)
+      expect(gate_step).to have_attributes(status: "skipped", kind: "gate", output: nil)
+      expect(run.reload.status).to eq("completed")
+      expect(run.steps.find_by(position: 2).status).to eq("succeeded") # :book still ran
+    end
+
+    it "evaluates when: with the step's own context, including a prior step's output" do
+      stub_const("ExecutorSpecGateContextWorkflow", gate_workflow(->(ctx) { ctx.extract[:total_cents] > 100_00 }))
+      # invoice_id: 200 -> extract's 200 * 100 = 20000 cents, well over the 10000 threshold
+      run = build_run(workflow_class: ExecutorSpecGateContextWorkflow, input: { invoice_id: 200 })
+
+      # when: evaluated true here (20000 > 10000), which isn't supported yet - raises,
+      # same as the dedicated "evaluates true" test below. Confirms real ctx access
+      # (ctx.extract's actual value), not just a stubbed condition.
+      expect { described_class.new(run).call }.to raise_error(Belay::Error, /evaluated true/)
+
+      expect(run.steps.find_by(position: 1).status).to eq("failed")
+      expect(run.steps.where(position: 2)).to be_empty
+    end
+
+    it "raises a clear, not-yet-implemented error when when: evaluates true - pausing for a human isn't built yet" do
+      stub_const("ExecutorSpecGateTrueWorkflow", gate_workflow(->(_ctx) { true }))
+      run = build_run(workflow_class: ExecutorSpecGateTrueWorkflow)
+
+      expect { described_class.new(run).call }
+        .to raise_error(Belay::Error, /approval.*evaluated true.*isn't implemented yet/)
+
+      gate_step = run.steps.find_by(position: 1)
+      expect(gate_step).to have_attributes(status: "failed", kind: "gate")
+      expect(run.reload.status).to eq("running") # never reaches complete! - the raise propagates out
+    end
+
+    it "resumes past an already-skipped gate without calling when: again" do
+      calls = 0
+      stub_const("ExecutorSpecGateResumeWorkflow", gate_workflow(lambda { |_ctx|
+        calls += 1
+        false
+      }))
+      run = build_run(workflow_class: ExecutorSpecGateResumeWorkflow)
+      Belay::Step.create!(run: run, position: 1, name: "approval", kind: "gate", status: "skipped",
+                          output: nil, idempotency_key: "#{run.id}:1")
+
+      described_class.new(run).call
+
+      expect(calls).to eq(0) # never invoked - the existing skipped row was reused as-is
+      expect(run.reload.status).to eq("completed")
+    end
+
+    it "re-evaluates when: once per attempt under retries:, same as a step's block would be re-run" do
+      calls = 0
+      stub_const("ExecutorSpecGateRetriesWorkflow", gate_workflow(lambda { |_ctx|
+        calls += 1
+        true
+      }, retries: 2))
+      run = build_run(workflow_class: ExecutorSpecGateRetriesWorkflow)
+
+      expect { described_class.new(run).call }.to raise_error(Belay::Error, /evaluated true/)
+
+      # retries: 2 means 3 attempts total (1 + 2), each its own row, each re-calling
+      # when: - nothing here special-cases a gate to call it only once regardless of
+      # retries:, documented on evaluate_gate! in executor.rb.
+      expect(calls).to eq(3)
+      expect(run.steps.where(position: 1).count).to eq(3)
     end
   end
 

@@ -90,23 +90,28 @@ module Belay
 
       private
 
-      # Step#status has five legal values. A row found already skipped/needs_review
-      # was left that way for a reason this can't evaluate yet - re-running it would
-      # be guessing, same as a freshly-flagged needs_review row would be if dispatch
-      # were called on it again in the same process (it never is, today: flagging
-      # always raises right after, see flag_needs_review! below).
+      # Step#status has five legal values. "succeeded" and "skipped" resume the same
+      # way - reuse the stored output, never re-evaluate (DESIGN_DECISIONS #7: a
+      # gate's when: is not re-run against whatever context resume happens to have).
+      # needs_review was left that way for a reason this can't evaluate yet -
+      # re-running it would be guessing, same as a freshly-flagged needs_review row
+      # would be if dispatch were called on it again in the same process (it never
+      # is, today: flagging always raises right after, see flag_needs_review! below).
       def dispatch(step_run, existing) # rubocop:disable Metrics/MethodLength
         case existing&.status
         when nil
           attempt_step(step_run, attempt: 1)
         when "started"
           resume_orphaned_started(step_run, existing)
-        when "succeeded"
+        when "succeeded", "skipped"
           symbolize_output(existing.output)
         when "failed"
           retry_or_raise(step_run, existing)
-        else
+        when "needs_review"
           raise unsafe_to_rerun_error(step_run, existing)
+        else
+          raise Error, "belay_steps##{existing.id} at position #{step_run.position} has unrecognized status " \
+                       "#{existing.status.inspect} - refusing to guess what resuming it should do"
         end
       end
 
@@ -124,6 +129,12 @@ module Belay
       # Workflow), so idempotent: "false" - a string, not a boolean, from an author
       # who doesn't think in Ruby truthiness - would otherwise be truthy and silently
       # authorize resuming a step the author was trying to mark unsafe.
+      #
+      # Applies to an orphaned gate exactly the same way, even though re-evaluating
+      # a pure when: condition is arguably always safe regardless of idempotent: -
+      # a gate crashing mid-evaluation is rare and not this commit's problem to
+      # solve; an author who wants one resumed without flagging needs_review can
+      # already declare idempotent: true on it today, same as any step.
       def resume_orphaned_started(step_run, existing)
         return attempt_step(step_run, attempt: existing.attempt, reuse: existing) if idempotent?(step_run)
 
@@ -150,9 +161,8 @@ module Belay
 
       def unsafe_to_rerun_error(step_run, existing)
         Error.new(
-          "belay_steps##{existing.id} at position #{step_run.position} is #{existing.status.inspect} - " \
-          "re-running it isn't safe. needs_review means a human needs to resolve it first (no resolve-and-" \
-          "resume action exists yet - that's dashboard work, Phase 2); skipped isn't produced by anything yet"
+          "belay_steps##{existing.id} at position #{step_run.position} is needs_review - a human needs to " \
+          "resolve it first (no resolve-and-resume action exists yet - that's dashboard work, Phase 2)"
         )
       end
 
@@ -181,22 +191,62 @@ module Belay
         end
       end
 
-      # One attempt: run the block, checkpoint the result. Returns [output, nil] on
-      # success or [nil, error] on failure - never raises itself, so the retry loop
-      # above decides whether to try again or propagate. context is built before the
-      # risky call so the rescue clause can still reach its llm_metadata - ctx.llm
-      # may have already made a real, billed provider call before the block went on
-      # to raise for an unrelated reason; that cost is recorded on the failed row
-      # too, not dropped.
+      # One attempt: run the block (or, for a gate, evaluate when:), checkpoint the
+      # result. Returns [output, nil] on success or [nil, error] on failure - never
+      # raises itself, so the retry loop above decides whether to try again or
+      # propagate. context is built before the risky call so the rescue clause can
+      # still reach its llm_metadata - ctx.llm may have already made a real, billed
+      # provider call before the block went on to raise for an unrelated reason;
+      # that cost is recorded on the failed row too, not dropped.
+      #
+      # A gate reuses this same checkpoint/retry machinery rather than a separate
+      # path: start_checkpoint! already writes kind: :gate correctly (it was never
+      # nil, so DEFAULT_KIND never kicks in), and evaluate_gate! below stands in for
+      # block.call - its result settles the row exactly like a step's output would,
+      # just under status: "skipped" instead of "succeeded".
       def run_attempt(step_run, step)
         context = build_context(step_run)
-        output = step_run.step_definition.block.call(context)
-        step.update!(status: "succeeded", output: output, **extra_step_attrs(step_run, context))
+        output = run_block(step_run, context)
+        step.update!(status: settled_status(step_run), output: output, **extra_step_attrs(step_run, context))
         [output, nil]
       rescue StandardError => e
         step.update!(status: "failed", error: { "class" => e.class.name, "message" => e.message },
                      **extra_step_attrs(step_run, context))
         [nil, e]
+      end
+
+      def run_block(step_run, context)
+        return evaluate_gate!(step_run, context) if step_run.step_definition.kind == :gate
+
+        step_run.step_definition.block.call(context)
+      end
+
+      def settled_status(step_run)
+        step_run.step_definition.kind == :gate ? "skipped" : "succeeded"
+      end
+
+      # when: true means a human should be asked before the run continues - not
+      # implemented yet (the next commit), so it raises here rather than silently
+      # passing through as if the gate were satisfied. Raising inside run_attempt's
+      # rescue reuses the same checkpoint-as-failed/retry machinery a step's own
+      # raise gets: the row records why, and resuming the run raises the same clear
+      # error again (via retry_or_raise) rather than resuming into unsupported
+      # behavior silently.
+      #
+      # Reusing that machinery means retries: also applies to a gate exactly like it
+      # would to a step: gate(..., retries: 3, when: cond) re-calls cond N+1 times
+      # (once per attempt) before finally raising, same as a step's block would be
+      # re-run N+1 times. Harmless if when: is the pure predicate it's meant to be;
+      # worth knowing if an author's when: is ever NOT side-effect-free, since
+      # nothing here special-cases a gate to call it only once regardless of
+      # retries:.
+      def evaluate_gate!(step_run, context)
+        condition = step_run.step_definition.options[:when]
+        return nil unless condition.call(context)
+
+        raise Error, "gate :#{step_run.step_definition.name} evaluated true - pausing a run for human " \
+                     "approval isn't implemented yet (the next commit); only when: false (skip) is " \
+                     "supported today"
       end
 
       def extra_step_attrs(step_run, context)

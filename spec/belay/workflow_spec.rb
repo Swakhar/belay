@@ -371,24 +371,20 @@ RSpec.describe Belay::Workflow do
       expect(Belay::Run.where(idempotency_key: "wf-race-1").count).to eq(1)
     end
 
-    # Documents a known, temporary gap rather than leaving it an unverified claim:
-    # the executor doesn't understand kind: :gate yet (that's the next commit), so a
-    # gate has no block and the executor tries to call one anyway. This is NOT "no
-    # effect" - it's a crash, a step left checkpointed failed, and a run stuck
-    # running. Should start failing once the executor commit lands; when it does,
-    # replace this with real gate-skip/pause behavior instead of deleting it blind.
-    it "raises NoMethodError if a workflow with a gate is run - the executor doesn't support kind: :gate yet" do
-      klass = defined_workflow_class("WorkflowSpecGateNotYetSupported") do
+    # Executor-level gate behavior (skip on false, not-yet-implemented error on
+    # true, resume reusing a skipped row) has its own dedicated coverage in
+    # executor_spec.rb's "gates" describe block - this just confirms .start wires a
+    # gate-containing workflow through to the real executor at all, end to end.
+    it "runs a gate through to a real skip via .start, end to end" do
+      klass = defined_workflow_class("WorkflowSpecGateIntegration") do
         input :invoice_id
-        gate(:approval, when: ->(_ctx) { true })
+        gate(:approval, when: ->(_ctx) { false })
       end
 
-      expect { klass.start(invoice_id: 42, idempotency_key: "wf-gate-1") }
-        .to raise_error(NoMethodError, /undefined method .call. for nil/)
+      run = klass.start(invoice_id: 42, idempotency_key: "wf-gate-1")
 
-      run = Belay::Run.find_by(idempotency_key: "wf-gate-1")
-      expect(run.status).to eq("running") # never reaches complete! - the raise propagates out of Executor#call
-      expect(run.steps.sole.status).to eq("failed")
+      expect(run.status).to eq("completed")
+      expect(run.steps.sole).to have_attributes(status: "skipped", kind: "gate")
     end
   end
 

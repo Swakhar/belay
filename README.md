@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release, Phase 1 (core runtime) complete as of `v0.1.0.pre1`, Phase 2 (gates & dashboard) in progress. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13) — the "boring," no-gate path of the Target API below actually runs. `gate` is checkpointed correctly either way now: `when:` false skips it and the run continues past it; `when:` true pauses the run (releasing its lease) and leaves the gate `awaiting_approval`, with `run.pending_gate` returning that step. Resolving a pending gate is implemented too: `run.approve!(by:)` settles the gate `succeeded`, records a `Belay::Approval`, resumes the run and enqueues `ResumeRunJob`; `run.reject!(by:)` settles it `failed`, records the rejection, and fails the run outright (nothing to resume into). Not yet implemented: the dashboard (rest of Phase 2), and approving with an edited payload — a run executes synchronously in the calling process until it either finishes or hits a gate; `ResumeRunJob` is only on the hot path once a gate resumes it.
+**Status:** pre-release, Phase 1 (core runtime) complete as of `v0.1.0.pre1`, Phase 2 (gates & dashboard) in progress. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13) — the "boring," no-gate path of the Target API below actually runs. `gate` is checkpointed correctly either way now: `when:` false skips it and the run continues past it; `when:` true pauses the run (releasing its lease) and leaves the gate `awaiting_approval`, with `run.pending_gate` returning that step. Resolving a pending gate is implemented too: `run.approve!(by:, edited_payload: nil)` settles the gate `succeeded`, records a `Belay::Approval`, resumes the run and enqueues `ResumeRunJob`; `run.reject!(by:)` settles it `failed`, records the rejection, and fails the run outright (nothing to resume into). `Belay::Engine` is mountable (`mount Belay::Engine => "/belay"`) and gated behind a configurable `authenticate_with` hook — see Mounting the dashboard, below — but the dashboard pages themselves (runs index, run detail, approve/reject/resolve actions) aren't built yet; mounting it today gets you an authenticated but otherwise empty engine. A run executes synchronously in the calling process until it either finishes or hits a gate; `ResumeRunJob` is only on the hot path once a gate resumes it.
 
 ## Installation
 
@@ -40,6 +40,20 @@ end
 ```
 
 `lease_duration`/`heartbeat_interval` default to the values above; the initializer is only needed to change them. `lease_duration` is read by `Run#acquire_lease!`/`#heartbeat_lease!` and `JanitorJob`; `heartbeat_interval` is how often a caller is expected to heartbeat (nothing currently heartbeats automatically mid-step - see `lib/belay/resume_run_job.rb`'s and `lib/belay/janitor_job.rb`'s comments for the gap this leaves for a step slower than `lease_duration`). `provider` defaults to `nil` - a workflow with no `ctx.llm`-calling steps never needs it, but calling `ctx.llm` without configuring one raises a clear error.
+
+## Mounting the dashboard
+
+```ruby
+# config/routes.rb
+mount Belay::Engine => "/belay"
+
+# config/initializers/belay.rb
+Belay.configure do |config|
+  config.authenticate_with = ->(request) { request.env["warden"]&.authenticate(:scope => :admin) }
+end
+```
+
+`Belay::Engine` is a real, isolated `Rails::Engine` (`isolate_namespace Belay`, so its routes/controllers never collide with a host app's own) - mounting it is implemented and proven with a real HTTP request through Rails' own router and middleware stack, not just designed (`spec/belay/engine_spec.rb`). `authenticate_with` gates every request: a `->(request) { ... }` proc returning truthy allows it, anything else gets a plain `401`. It has no default that allows anyone through - the dashboard is going to show prompts, responses, costs and approve/reject actions, so mounting the engine without configuring this raises a clear `Belay::Error` on the very first request, rather than quietly serving it to the whole internet. The dashboard pages themselves (runs index, run detail, approve/reject/resolve actions) are the rest of Phase 2, not built yet - mounting it today gets you an authenticated engine with nothing behind it yet.
 
 ## Target API
 

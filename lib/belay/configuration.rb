@@ -14,10 +14,19 @@ module Belay
     # one configured gets a clear error instead of a confusing NoMethodError on nil.
     attr_accessor :provider
 
+    # Gates who can load Belay::Engine's mounted dashboard: a ->(request) { boolean }
+    # proc, called on every request. nil by default - deliberately NOT "open to
+    # anyone" by default, since the dashboard shows prompts, responses, costs and
+    # approve/reject actions. Belay::ApplicationController raises a clear error if
+    # this is still nil when a request actually arrives, rather than quietly
+    # serving it unauthenticated. See lib/belay/application_controller.rb.
+    attr_accessor :authenticate_with
+
     def initialize
       @lease_duration = 300
       @heartbeat_interval = 30
       @provider = nil
+      @authenticate_with = nil
     end
   end
 end

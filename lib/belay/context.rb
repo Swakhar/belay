@@ -77,7 +77,13 @@ module Belay
       # whatever's in @llm_metadata onto that failed row regardless, which only
       # works if the merge already happened before the raise, not after it.
       fields = response.to_h.slice(:model, :input_tokens, :output_tokens, :cost_cents, :latency_ms)
-      @llm_metadata.merge!(provider: provider.class.name, **fields)
+      # input: prompt, not :prompt - matches belay_steps' own column name exactly
+      # (same reasoning as every other key here: extra_step_attrs below merges
+      # this whole hash straight into step.update!, with no translation step in
+      # between), so the dashboard's run page (feat(dashboard): run page with
+      # step timeline, prompt, response, tokens and cost) has something real to
+      # show as "prompt" - the exact value passed to ctx.llm, not a summary of it.
+      @llm_metadata.merge!(provider: provider.class.name, input: prompt, **fields)
 
       validate_against_schema!(response.content, schema) if schema
       response.content

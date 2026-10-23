@@ -21,6 +21,22 @@ module Belay
       @workflows = Run.distinct.order(:workflow).pluck(:workflow)
     end
 
+    # Run.find, not a rescued custom lookup: ActiveRecord::RecordNotFound is
+    # already in Rails' own default list of exceptions rendered as a plain 404,
+    # unlike a bespoke Belay::Error (see ApplicationController's own comment on
+    # authenticate_belay! raising loudly on purpose) - a run id that doesn't
+    # exist is an ordinary, expected "nothing there" case, not a misconfiguration
+    # worth failing loudly over.
+    #
+    # Every attempt of every step, not just the latest: a "timeline" is a record
+    # of what happened, including retries, same reasoning DESIGN_DECISIONS #7
+    # ("gates are steps") gives for checkpointing every outcome rather than only
+    # the final one.
+    def show
+      @run = Run.find(params[:id])
+      @steps = @run.steps.order(:position, :attempt)
+    end
+
     private
 
     def filtered_runs

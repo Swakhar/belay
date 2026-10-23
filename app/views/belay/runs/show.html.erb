@@ -1,0 +1,52 @@
+<h1>Run <%= @run.id %></h1>
+
+<p>
+  Workflow: <%= @run.workflow %> (<%= @run.workflow_version %>)<br>
+  Status: <%= @run.status %><br>
+  Started: <%= @run.started_at %><br>
+  Finished: <%= @run.finished_at %>
+</p>
+
+<h2>Steps</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Position</th>
+      <th>Attempt</th>
+      <th>Name</th>
+      <th>Kind</th>
+      <th>Status</th>
+      <th>Prompt</th>
+      <th>Response</th>
+      <th>Model</th>
+      <th>Input tokens</th>
+      <th>Output tokens</th>
+      <th>Cost</th>
+      <th>Error</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% @steps.each do |step| %>
+      <tr>
+        <td><%= step.position %></td>
+        <td><%= step.attempt %></td>
+        <td><%= step.name %></td>
+        <td><%= step.kind %></td>
+        <td><%= step.status %></td>
+        <td><%= step.input %></td>
+        <td><%= step.output %></td>
+        <td><%= step.model %></td>
+        <td><%= step.input_tokens %></td>
+        <td><%= step.output_tokens %></td>
+        <td><%= number_to_currency(step.cost_cents / 100.0) if step.cost_cents %></td>
+        <%# error isn't one consistent shape across this codebase: run_attempt's
+            own rescue writes {"class", "message"}, but flag_needs_review! and
+            Run#reject! both write {"reason"} instead - exactly the rows a human
+            opens this page to investigate (needs_review, a rejected gate), so
+            falling back to "reason" matters here, not just "message" alone. %>
+        <td><%= step.error&.dig("message") || step.error&.dig("reason") %></td>
+      </tr>
+    <% end %>
+  </tbody>
+</table>

@@ -158,8 +158,8 @@ RSpec.describe Belay::Context do
         ctx = described_class.new
 
         expect { ctx.llm(model: "x", prompt: "extract", schema: schema) }.to raise_error(Belay::Context::SchemaValidationError)
-        expect(ctx.llm_metadata).to eq(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input_tokens: nil,
-                                       output_tokens: nil, cost_cents: 18, latency_ms: nil)
+        expect(ctx.llm_metadata).to eq(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input: "extract",
+                                       input_tokens: nil, output_tokens: nil, cost_cents: 18, latency_ms: nil)
       end
 
       it "accepts a symbol-keyed schema, not just string-keyed" do
@@ -205,7 +205,7 @@ RSpec.describe Belay::Context do
       expect(described_class.new.llm_metadata).to eq({})
     end
 
-    it "records provider, model, tokens, cost and latency after a successful #llm call" do
+    it "records provider, model, the prompt, tokens, cost and latency after a successful #llm call" do
       response = Belay::ProviderResponse.new(content: "x", model: "claude-sonnet-5-5", input_tokens: 10,
                                              output_tokens: 5, cost_cents: 18, latency_ms: 420)
       Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [response]) }
@@ -213,8 +213,18 @@ RSpec.describe Belay::Context do
 
       ctx.llm(model: "claude-sonnet-5-5", prompt: "hi")
 
-      expect(ctx.llm_metadata).to eq(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input_tokens: 10,
-                                     output_tokens: 5, cost_cents: 18, latency_ms: 420)
+      expect(ctx.llm_metadata).to eq(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input: "hi",
+                                     input_tokens: 10, output_tokens: 5, cost_cents: 18, latency_ms: 420)
+    end
+
+    it "records whatever prompt: was given verbatim, not a summary of it" do
+      response = Belay::ProviderResponse.new(content: "x", model: "claude-sonnet-5-5")
+      Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: [response]) }
+      ctx = described_class.new
+
+      ctx.llm(model: "claude-sonnet-5-5", prompt: "extract the total from this invoice")
+
+      expect(ctx.llm_metadata[:input]).to eq("extract the total from this invoice")
     end
 
     it "returns a frozen Hash, so a caller can't corrupt what the executor later reads" do

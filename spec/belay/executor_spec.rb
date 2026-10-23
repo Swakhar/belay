@@ -76,7 +76,7 @@ RSpec.describe Belay::Executor do
       described_class.new(run).call
 
       step = run.steps.sole
-      expect(step).to have_attributes(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5",
+      expect(step).to have_attributes(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input: "hi",
                                       input_tokens: 10, output_tokens: 5, cost_cents: 18, latency_ms: 420)
     end
 

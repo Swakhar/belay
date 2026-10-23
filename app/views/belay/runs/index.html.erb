@@ -18,7 +18,7 @@
   <tbody>
     <% @runs.each do |run| %>
       <tr>
-        <td class="run-workflow"><%= run.workflow %></td>
+        <td><%= link_to run.workflow, run_path(run), class: "run-workflow" %></td>
         <td class="run-status"><%= run.status %></td>
         <td><%= run.started_at %></td>
         <td><%= run.finished_at %></td>

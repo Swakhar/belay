@@ -6,9 +6,12 @@
     <%= csrf_meta_tags %>
     <style><%= raw Belay::Engine.stylesheet %></style>
   </head>
-  <body>
-    <% if notice %><p class="flash-notice"><%= notice %></p><% end %>
-    <% if alert %><p class="flash-alert"><%= alert %></p><% end %>
-    <%= yield %>
+  <body class="bg-slate-50 font-sans text-slate-900 antialiased">
+    <%= render "belay/shared/navbar" %>
+
+    <main class="mx-auto max-w-5xl px-4 py-8 sm:px-6">
+      <%= render "belay/shared/flash" %>
+      <%= yield %>
+    </main>
   </body>
 </html>

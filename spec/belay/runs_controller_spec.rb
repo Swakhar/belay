@@ -47,6 +47,25 @@ RSpec.describe Belay::RunsController do
     run.reload
   end
 
+  def simulate_crashed_step(run)
+    run.steps.create!(position: 0, name: "extract", kind: "decision", status: "started",
+                      idempotency_key: "#{run.id}:0")
+  end
+
+  def build_run_with_needs_review # rubocop:disable Metrics/AbcSize
+    stub_const("RunsControllerSpecNeedsReviewWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } } # no idempotent: true
+      step(:book) { |ctx| { booked_total_cents: ctx.extract&.dig(:total_cents) } }
+    end)
+    run = Belay::Run.create!(workflow: "RunsControllerSpecNeedsReviewWorkflow",
+                             workflow_version: RunsControllerSpecNeedsReviewWorkflow.workflow_version,
+                             input: { invoice_id: 42 })
+    simulate_crashed_step(run) # a non-idempotent step left "started" - simulates a crash mid-step
+    expect { Belay::Executor.new(run).call }.to raise_error(Belay::Error)
+    run.reload
+  end
+
   def build_run(workflow: "InvoiceWorkflow", status: "pending", **attrs)
     Belay::Run.create!({ workflow: workflow, workflow_version: "v1", status: status }.merge(attrs))
   end
@@ -326,6 +345,91 @@ RSpec.describe Belay::RunsController do
         expect(session.response.body).to include("who is rejecting this?")
         expect(run.reload.status).to eq("paused")
         expect(run.approvals.count).to eq(0)
+      end
+    end
+  end
+
+  describe "#resolve" do
+    it "requires authentication" do
+      run = build_run_with_needs_review
+
+      expect { post("/belay/runs/#{run.id}/resolve", by: "alice", outcome: "succeeded") }
+        .to raise_error(Belay::Error, /authenticate_with/)
+    end
+
+    context "once authenticated" do
+      before { Belay.configure { |c| c.authenticate_with = ->(_request) { true } } }
+
+      it "resolves the step succeeded with the given output, resumes the run and redirects back to it" do
+        run = build_run_with_needs_review
+
+        session = post("/belay/runs/#{run.id}/resolve", by: "alice@example.com", outcome: "succeeded",
+                                                        output: '{"total_cents": 4200}')
+
+        expect(session.response.status).to eq(302)
+        expect(redirect_path(session)).to eq("/belay/runs/#{run.id}")
+        step = run.steps.find_by(name: "extract")
+        expect(step.status).to eq("succeeded")
+        expect(step.output).to eq("total_cents" => 4200)
+        expect(step.resolved_by).to eq("alice@example.com")
+      end
+
+      it "resolves the step failed and fails the run outright" do
+        run = build_run_with_needs_review
+
+        session = post("/belay/runs/#{run.id}/resolve", by: "alice", outcome: "failed")
+
+        expect(session.response.status).to eq(302)
+        expect(run.reload.status).to eq("failed")
+        expect(run.steps.find_by(name: "extract").resolved_by).to eq("alice")
+      end
+
+      it "redirects back with nothing resolved, rather than crashing, when output isn't valid JSON" do
+        run = build_run_with_needs_review
+
+        session = post("/belay/runs/#{run.id}/resolve", by: "alice", outcome: "succeeded", output: "{not json")
+
+        expect(session.response.status).to eq(302)
+        expect(run.reload.pending_needs_review).not_to be_nil
+      end
+
+      it "ignores a malformed output: when resolving failed - it's never used, so it shouldn't block the request" do
+        run = build_run_with_needs_review
+
+        session = post("/belay/runs/#{run.id}/resolve", by: "alice", outcome: "failed", output: "{not json")
+
+        expect(session.response.status).to eq(302)
+        expect(run.reload.status).to eq("failed")
+      end
+
+      it "redirects back with nothing resolved for an unrecognized outcome, rather than raising" do
+        run = build_run_with_needs_review
+
+        session = post("/belay/runs/#{run.id}/resolve", by: "alice", outcome: "maybe")
+
+        expect(session.response.status).to eq(302)
+        session.follow_redirect!
+        expect(session.response.body).to include("outcome must be succeeded or failed")
+        expect(run.reload.pending_needs_review).not_to be_nil
+      end
+
+      it "redirects back with nothing resolved, rather than raising, when the run has no needs_review step" do
+        run = build_run
+
+        session = post("/belay/runs/#{run.id}/resolve", by: "alice", outcome: "succeeded")
+
+        expect(session.response.status).to eq(302)
+      end
+
+      it "requires by: to be present" do
+        run = build_run_with_needs_review
+
+        session = post("/belay/runs/#{run.id}/resolve", by: "", outcome: "succeeded")
+
+        expect(session.response.status).to eq(302)
+        session.follow_redirect!
+        expect(session.response.body).to include("who is resolving this?")
+        expect(run.reload.pending_needs_review).not_to be_nil
       end
     end
   end

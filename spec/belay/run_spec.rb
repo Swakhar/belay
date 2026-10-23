@@ -405,4 +405,112 @@ RSpec.describe Belay::Run do
       expect(run.reload.status).to eq("failed")
     end
   end
+
+  # Exercises the real flag_needs_review! path (executor.rb) rather than hand-
+  # building a needs_review row, same reasoning build_paused_run above gives for
+  # gates: this proves resolve_needs_review! against the exact state a real
+  # crash-and-resume leaves behind, not an approximation of it.
+  def simulate_crashed_step(run)
+    run.steps.create!(position: 0, name: "extract", kind: "decision", status: "started",
+                      idempotency_key: "#{run.id}:0")
+  end
+
+  def build_run_with_needs_review # rubocop:disable Metrics/AbcSize
+    stub_const("RunSpecNeedsReviewWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } } # no idempotent: true
+      step(:book) { |ctx| { booked_total_cents: ctx.extract&.dig(:total_cents) } }
+    end)
+    run = described_class.create!(
+      workflow: "RunSpecNeedsReviewWorkflow", workflow_version: RunSpecNeedsReviewWorkflow.workflow_version,
+      input: { invoice_id: 42 }
+    )
+    simulate_crashed_step(run) # a non-idempotent step left "started" - simulates a crash mid-step
+    expect { Belay::Executor.new(run).call }.to raise_error(Belay::Error, /needs_review|idempotent/)
+    run.reload
+  end
+
+  describe "#pending_needs_review" do
+    it "returns nil when the run has no needs_review step" do
+      run = build_run.tap(&:start!)
+
+      expect(run.pending_needs_review).to be_nil
+    end
+
+    it "returns the step flagged needs_review" do
+      run = build_run_with_needs_review
+
+      expect(run.pending_needs_review).to eq(run.steps.find_by(name: "extract"))
+    end
+  end
+
+  describe "#resolve_needs_review!" do
+    it "raises if the run has no needs_review step" do
+      run = build_run.tap(&:start!)
+
+      expect { run.resolve_needs_review!(by: "reviewer", outcome: "succeeded") }
+        .to raise_error(Belay::Error, /no needs_review step/)
+    end
+
+    it "raises ArgumentError for an outcome that isn't succeeded or failed" do
+      run = build_run_with_needs_review
+
+      expect { run.resolve_needs_review!(by: "reviewer", outcome: "approved") }
+        .to raise_error(ArgumentError, /succeeded.*failed/)
+    end
+
+    it "settles the step succeeded with the given output, resumes the run and enqueues ResumeRunJob" do
+      run = build_run_with_needs_review
+      step = run.pending_needs_review
+      expect(Belay::ResumeRunJob).to receive(:perform_later).with(run.id)
+
+      run.resolve_needs_review!(by: "reviewer@example.com", outcome: "succeeded", output: { total_cents: 4200 })
+
+      step.reload
+      expect(step.status).to eq("succeeded")
+      expect(step.output).to eq("total_cents" => 4200)
+      expect(step.resolved_by).to eq("reviewer@example.com")
+      expect(step.resolved_at).to be_present
+      expect(run.reload.status).to eq("running")
+    end
+
+    it "actually resumes past the step to the next one once the enqueued ResumeRunJob runs" do
+      run = build_run_with_needs_review
+
+      run.resolve_needs_review!(by: "reviewer", outcome: "succeeded", output: { total_cents: 4200 })
+      Belay::ResumeRunJob.perform_now(run.id)
+
+      expect(run.reload.status).to eq("completed")
+      expect(run.steps.find_by(name: "book").output).to eq("booked_total_cents" => 4200)
+    end
+
+    it "settles the step failed and fails the run outright, without enqueuing anything" do
+      run = build_run_with_needs_review
+      step = run.pending_needs_review
+      expect(Belay::ResumeRunJob).not_to receive(:perform_later)
+
+      run.resolve_needs_review!(by: "reviewer@example.com", outcome: "failed")
+
+      step.reload
+      expect(step.status).to eq("failed")
+      expect(step.resolved_by).to eq("reviewer@example.com")
+      expect(run.reload.status).to eq("failed")
+    end
+
+    it "raises a clean error, not a silent overwrite, when a racing call already resolved this step" do
+      run = build_run_with_needs_review
+      step = run.pending_needs_review
+      # Stubbed, not re-fetched: simulates this caller's in-memory read happening
+      # BEFORE a second caller's write lands, same as a true race would - calling
+      # pending_needs_review for real here would just see the already-succeeded
+      # row and correctly report "no needs_review step to resolve" instead of
+      # reaching the specific conditional-UPDATE path this test is about.
+      allow(run).to receive(:pending_needs_review).and_return(step)
+      step.update_columns(status: "succeeded") # the second caller actually won first
+
+      expect { run.resolve_needs_review!(by: "reviewer", outcome: "failed") }
+        .to raise_error(Belay::Error, /already resolved/)
+      expect(step.reload.status).to eq("succeeded") # unchanged - not overwritten back to failed
+    end
+  end
 end

@@ -31,8 +31,8 @@ module Belay
       skipped: "skipped",
       needs_review: "needs_review",
       # Only a gate ever settles here: when: evaluated true, and this step is
-      # paused waiting for a human's approve!/reject! (not implemented yet).
-      # Distinct from "started" (crashed-or-in-flight, resumed via the
+      # paused waiting for a human's Run#approve!/reject!. Distinct from
+      # "started" (crashed-or-in-flight, resumed via the
       # idempotent?/needs_review policy) and from "needs_review" (a different
       # kind of human intervention, for a non-idempotent step orphaned by a
       # crash) - this one is a clean, intentional pause, not a recovery path.

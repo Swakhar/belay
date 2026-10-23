@@ -25,6 +25,27 @@
   <% end %>
 <% end %>
 
+<% if @run.pending_needs_review %>
+  <h2>Needs review: <%= @run.pending_needs_review.name %></h2>
+  <p><%= @run.pending_needs_review.error&.dig("reason") %></p>
+
+  <%= form_with url: resolve_run_path(@run), method: :post, local: true do |f| %>
+    <%= f.hidden_field :outcome, value: "succeeded" %>
+    <%= f.label :by, "Resolved by" %>
+    <%= f.text_field :by %>
+    <%= f.label :output, "Output (optional JSON) - the step's own block never returned one" %>
+    <%= f.text_area :output %>
+    <%= f.submit "Mark succeeded" %>
+  <% end %>
+
+  <%= form_with url: resolve_run_path(@run), method: :post, local: true do |f| %>
+    <%= f.hidden_field :outcome, value: "failed" %>
+    <%= f.label :by, "Resolved by" %>
+    <%= f.text_field :by %>
+    <%= f.submit "Mark failed" %>
+  <% end %>
+<% end %>
+
 <h2>Steps</h2>
 
 <table>

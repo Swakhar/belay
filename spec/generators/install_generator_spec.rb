@@ -55,7 +55,8 @@ RSpec.describe Belay::Generators::InstallGenerator do
 
     expect(content).to include("create_table :belay_steps, id: :uuid")
     %w[run_id position name kind status input output provider model input_tokens
-       output_tokens cost_cents latency_ms attempt idempotency_key error].each do |column|
+       output_tokens cost_cents latency_ms attempt idempotency_key error
+       resolved_by resolved_at].each do |column|
       expect(content).to include(":#{column}")
     end
 

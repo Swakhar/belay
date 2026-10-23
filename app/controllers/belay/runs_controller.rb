@@ -70,7 +70,33 @@ module Belay
       redirect_with(alert: e.message)
     end
 
+    # outcome: is form input (two separate forms on the run page, one per
+    # outcome, each with a hidden field set to its own value), checked against
+    # Run::RESOLUTIONS the same way approve/reject check for a pending gate
+    # first - resolve_needs_review! itself also raises ArgumentError for an
+    # unrecognized outcome, but checking it here first keeps that message a
+    # flash alert instead of a raw 500 for a tampered/malformed request.
+    def resolve # rubocop:disable Metrics/AbcSize
+      @run = Run.find(params[:id])
+      invalid = invalid_resolve_params
+      return redirect_with(alert: invalid) if invalid
+
+      @run.resolve_needs_review!(by: params[:by], outcome: params[:outcome], output: parsed_output)
+      redirect_with(notice: "Resolved as #{params[:outcome]}.")
+    rescue Error => e
+      redirect_with(alert: e.message)
+    rescue JSON::ParserError
+      redirect_with(alert: "output must be valid JSON")
+    end
+
     private
+
+    def invalid_resolve_params
+      return "who is resolving this?" if params[:by].blank?
+      return "outcome must be succeeded or failed" unless Run::RESOLUTIONS.include?(params[:outcome])
+
+      nil
+    end
 
     def redirect_with(notice: nil, alert: nil)
       redirect_to run_path(@run), notice: notice, alert: alert
@@ -81,6 +107,16 @@ module Belay
     # empty object.
     def parsed_edited_payload
       raw = params[:edited_payload].presence
+      raw && JSON.parse(raw)
+    end
+
+    # Only parsed for outcome: "succeeded" - resolve_failed! ignores output:
+    # entirely, so a stray/malformed output: on an outcome: "failed" request
+    # shouldn't reject it over something that was never going to be used.
+    def parsed_output
+      return nil unless params[:outcome] == "succeeded"
+
+      raw = params[:output].presence
       raw && JSON.parse(raw)
     end
 

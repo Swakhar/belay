@@ -1,11 +1,14 @@
 # frozen_string_literal: true
 
 module Belay
-  class Run < ApplicationRecord
+  class Run < ApplicationRecord # rubocop:disable Metrics/ClassLength
     self.table_name = "belay_runs"
 
     has_many :steps, class_name: "Belay::Step"
     has_many :approvals, class_name: "Belay::Approval"
+
+    # The two outcomes resolve_needs_review! accepts - see its own comment below.
+    RESOLUTIONS = %w[succeeded failed].freeze
 
     # validate: false (the default) raises ArgumentError immediately on an invalid value,
     # rather than deferring to a validation error at save time. Right for internal state
@@ -60,6 +63,14 @@ module Belay
     # never pause on a gate at all), not an error condition.
     def pending_gate
       steps.awaiting_approval.first
+    end
+
+    # At most one, for the same reason pending_gate above is: flag_needs_review!
+    # (executor.rb) raises immediately after flagging a step, stopping dispatch
+    # right there - nothing in this codebase flags a second one before the first
+    # is resolved.
+    def pending_needs_review
+      steps.needs_review.first
     end
 
     # DESIGN_DECISIONS #5: "a worker claims a run with a conditional UPDATE on
@@ -208,7 +219,76 @@ module Belay
       raise Error, "belay_runs##{id}'s gate :#{gate.name} was already decided by another approve!/reject! call"
     end
 
+    # The two outcomes a human can give a needs_review step (flag_needs_review!,
+    # executor.rb): "succeeded" means they confirmed the step's real-world side
+    # effect actually happened (even though the process crashed before Belay
+    # itself ever saw that), settling the row with whatever output: they supply
+    # (there's no real one to recover - the block never returned) so a later
+    # step reading ctx.<name> sees something rather than nil. "failed" means
+    # they confirmed it did NOT happen, settling the row failed and - like
+    # reject! above - failing the run directly rather than resuming into
+    # dispatch's retry_or_raise at all: for a step with no retries: declared,
+    # resuming would hit max_attempts immediately and raise uncaught inside a
+    # job with no rescue, the same shape of bug the pause-on-gate commit fixed
+    # for gates - but for a step declared retries: N where the crash happened
+    # before attempt N, resuming would be worse, not better: it would silently
+    # RE-EXECUTE the block for a real retry, exactly the side effect a human
+    # just said did NOT happen. Failing directly avoids both failure modes at
+    # once, regardless of this step's own attempt/max_attempts.
+    #
+    # No Belay::Approval row here, unlike approve!/reject! - that model is
+    # built and documented specifically around gates (including its
+    # unique-per-gate-step index); a needs_review resolution isn't a gate
+    # decision, so it gets its own resolved_by/resolved_at columns on
+    # belay_steps instead (see that migration's own comment).
+    #
+    # Claimed with a conditional UPDATE (status: "needs_review" in the WHERE),
+    # not a plain update! on the in-memory row - pending_needs_review is read
+    # once, in memory, same as pending_gate is for approve!/reject!, so two
+    # callers racing to resolve the same step could both pass that check.
+    # Without a unique index to catch the loser (there's no Approval row to
+    # collide on here), a plain update! would let the second call silently
+    # overwrite whatever the first one just wrote - this update_all's return
+    # value (rows actually matched) is what's actually trusted, same
+    # trust-the-UPDATE's-own-result principle acquire_lease! above uses for
+    # exactly the same reason.
+    def resolve_needs_review!(by:, outcome:, output: nil)
+      unless RESOLUTIONS.include?(outcome)
+        raise ArgumentError, "outcome must be one of #{RESOLUTIONS.inspect}, got #{outcome.inspect}"
+      end
+
+      step = pending_needs_review
+      raise Error, "belay_runs##{id} has no needs_review step to resolve" if step.nil?
+
+      outcome == "succeeded" ? resolve_succeeded!(step, by: by, output: output) : resolve_failed!(step, by: by)
+    end
+
     private
+
+    def resolve_succeeded!(step, by:, output:)
+      ActiveRecord::Base.transaction do
+        claim_needs_review!(step, by: by, status: "succeeded", output: output)
+        resume!
+      end
+
+      ResumeRunJob.perform_later(id)
+    end
+
+    def resolve_failed!(step, by:)
+      reason = "belay_steps##{step.id} (:#{step.name}) resolved as failed by #{by}"
+      ActiveRecord::Base.transaction do
+        claim_needs_review!(step, by: by, status: "failed", error: { "reason" => reason })
+        fail!(error: { "reason" => reason })
+      end
+    end
+
+    def claim_needs_review!(step, by:, **attrs)
+      claimed = Step.where(id: step.id, status: "needs_review")
+                    .update_all(attrs.merge(resolved_by: by, resolved_at: Time.current))
+      return if claimed == 1
+
+      raise Error, "belay_steps##{step.id} was already resolved by someone else"
+    end
 
     # Shared by approve!/reject! - same "no pending gate" guard, worded for whichever
     # verb the caller used, so a human reading the raised error sees the action they

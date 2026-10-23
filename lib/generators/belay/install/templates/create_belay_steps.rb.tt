@@ -19,6 +19,15 @@ class CreateBelaySteps < ActiveRecord::Migration[<%= ActiveRecord::Migration.cur
       # presents the same key to an external API. See DESIGN_DECISIONS.md #3.
       t.string :idempotency_key, null: false
       t.jsonb :error
+      # Who/when resolved a needs_review step (Run#resolve_needs_review!) - named
+      # to match belay_approvals' decided_by/decided_at rather than invented fresh,
+      # same concept (a human recording a decision), different table because a
+      # needs_review resolution isn't a gate approval: there's no Belay::Approval
+      # row for it, and reusing that model (built and documented specifically
+      # around gates, including its unique-per-gate-step index) for an unrelated
+      # kind of step would overload what it means.
+      t.string :resolved_by
+      t.datetime :resolved_at
 
       t.timestamps
     end

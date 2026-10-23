@@ -3,6 +3,7 @@ Belay::Engine.routes.draw do
     member do
       post :approve
       post :reject
+      post :resolve
     end
   end
   root to: "runs#index"

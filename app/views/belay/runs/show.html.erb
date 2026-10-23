@@ -7,6 +7,24 @@
   Finished: <%= @run.finished_at %>
 </p>
 
+<% if @run.pending_gate %>
+  <h2>Pending gate: <%= @run.pending_gate.name %></h2>
+
+  <%= form_with url: approve_run_path(@run), method: :post, local: true do |f| %>
+    <%= f.label :by, "Approved by" %>
+    <%= f.text_field :by %>
+    <%= f.label :edited_payload, "Edited payload (optional JSON)" %>
+    <%= f.text_area :edited_payload %>
+    <%= f.submit "Approve" %>
+  <% end %>
+
+  <%= form_with url: reject_run_path(@run), method: :post, local: true do |f| %>
+    <%= f.label :by, "Rejected by" %>
+    <%= f.text_field :by %>
+    <%= f.submit "Reject" %>
+  <% end %>
+<% end %>
+
 <h2>Steps</h2>
 
 <table>

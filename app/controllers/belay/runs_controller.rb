@@ -37,7 +37,52 @@ module Belay
       @steps = @run.steps.order(:position, :attempt)
     end
 
+    # by: is a plain form field, not derived from the authenticated request -
+    # authenticate_with only ever answers "is this request allowed," not "who
+    # is making it" (see ApplicationController's own comment on that), so this
+    # gem has no identity concept of its own to read an actor from. Required
+    # non-blank here, not at the model/migration level (Run#approve!/reject!
+    # and the belay_approvals.decided_by column both happily accept nil) - a
+    # recorded decision with no actor defeats the point of the audit trail
+    # this dashboard exists to show, but that's a dashboard-level policy
+    # choice, not something every caller of approve!/reject! should be forced
+    # into (a script calling them directly might reasonably use a fixed
+    # system identity instead).
+    def approve
+      @run = Run.find(params[:id])
+      return redirect_with(alert: "who is approving this?") if params[:by].blank?
+
+      @run.approve!(by: params[:by], edited_payload: parsed_edited_payload)
+      redirect_with(notice: "Approved.")
+    rescue Error => e
+      redirect_with(alert: e.message)
+    rescue JSON::ParserError
+      redirect_with(alert: "edited payload must be valid JSON")
+    end
+
+    def reject
+      @run = Run.find(params[:id])
+      return redirect_with(alert: "who is rejecting this?") if params[:by].blank?
+
+      @run.reject!(by: params[:by])
+      redirect_with(notice: "Rejected.")
+    rescue Error => e
+      redirect_with(alert: e.message)
+    end
+
     private
+
+    def redirect_with(notice: nil, alert: nil)
+      redirect_to run_path(@run), notice: notice, alert: alert
+    end
+
+    # nil (not {}) when the field was left blank - approve!'s own edited_payload:
+    # nil default means "nothing edited," distinct from an explicitly-submitted
+    # empty object.
+    def parsed_edited_payload
+      raw = params[:edited_payload].presence
+      raw && JSON.parse(raw)
+    end
 
     def filtered_runs
       runs = Run.order(created_at: :desc)

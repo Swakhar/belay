@@ -23,6 +23,30 @@ RSpec.describe Belay::RunsController do
     session
   end
 
+  def post(path, params)
+    session = ActionDispatch::Integration::Session.new(Rails.application)
+    session.post(path, params: params)
+    session
+  end
+
+  def redirect_path(session)
+    URI(session.response.headers["Location"]).path
+  end
+
+  def build_paused_run
+    stub_const("RunsControllerSpecGateWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      gate(:approval, when: ->(_ctx) { true })
+      step(:book) { |ctx| { booked_total_cents: ctx.approval&.dig(:total_cents) } }
+    end)
+    run = Belay::Run.create!(workflow: "RunsControllerSpecGateWorkflow",
+                             workflow_version: RunsControllerSpecGateWorkflow.workflow_version,
+                             input: { invoice_id: 42 })
+    Belay::Executor.new(run).call
+    run.reload
+  end
+
   def build_run(workflow: "InvoiceWorkflow", status: "pending", **attrs)
     Belay::Run.create!({ workflow: workflow, workflow_version: "v1", status: status }.merge(attrs))
   end
@@ -197,6 +221,111 @@ RSpec.describe Belay::RunsController do
         session = get("/belay/runs/#{run.id}")
 
         expect(session.response.body).to include("not idempotent")
+      end
+    end
+  end
+
+  describe "#approve" do
+    it "requires authentication" do
+      run = build_paused_run
+
+      expect { post("/belay/runs/#{run.id}/approve", by: "alice") }.to raise_error(Belay::Error, /authenticate_with/)
+    end
+
+    context "once authenticated" do
+      before { Belay.configure { |c| c.authenticate_with = ->(_request) { true } } }
+
+      it "approves the pending gate and redirects back to the run" do
+        run = build_paused_run
+
+        session = post("/belay/runs/#{run.id}/approve", by: "alice@example.com")
+
+        expect(session.response.status).to eq(302)
+        expect(redirect_path(session)).to eq("/belay/runs/#{run.id}")
+        expect(run.reload.pending_gate).to be_nil
+        expect(run.approvals.sole.decided_by).to eq("alice@example.com")
+      end
+
+      it "accepts an edited payload as JSON, which becomes the gate's own output" do
+        run = build_paused_run
+
+        post("/belay/runs/#{run.id}/approve", by: "alice", edited_payload: '{"total_cents": 999}')
+
+        gate = run.steps.find_by(name: "approval")
+        expect(gate.output).to eq("total_cents" => 999)
+      end
+
+      it "redirects back with nothing approved, rather than crashing, when edited_payload isn't valid JSON" do
+        run = build_paused_run
+
+        session = post("/belay/runs/#{run.id}/approve", by: "alice", edited_payload: "{not valid json")
+
+        expect(session.response.status).to eq(302)
+        expect(run.reload.pending_gate).not_to be_nil
+      end
+
+      it "redirects back with nothing approved, rather than raising, when the run has no pending gate" do
+        run = build_run
+
+        session = post("/belay/runs/#{run.id}/approve", by: "alice")
+
+        expect(session.response.status).to eq(302)
+        expect(redirect_path(session)).to eq("/belay/runs/#{run.id}")
+      end
+
+      it "requires by: to be present - an approval with no recorded actor defeats the point of the audit trail" do
+        run = build_paused_run
+
+        session = post("/belay/runs/#{run.id}/approve", by: "")
+
+        expect(session.response.status).to eq(302)
+        session.follow_redirect!
+        expect(session.response.body).to include("who is approving this?")
+        expect(run.reload.pending_gate).not_to be_nil
+        expect(run.approvals.count).to eq(0)
+      end
+    end
+  end
+
+  describe "#reject" do
+    it "requires authentication" do
+      run = build_paused_run
+
+      expect { post("/belay/runs/#{run.id}/reject", by: "alice") }.to raise_error(Belay::Error, /authenticate_with/)
+    end
+
+    context "once authenticated" do
+      before { Belay.configure { |c| c.authenticate_with = ->(_request) { true } } }
+
+      it "rejects the pending gate, fails the run, and redirects back to it" do
+        run = build_paused_run
+
+        session = post("/belay/runs/#{run.id}/reject", by: "alice@example.com")
+
+        expect(session.response.status).to eq(302)
+        expect(redirect_path(session)).to eq("/belay/runs/#{run.id}")
+        expect(run.reload.status).to eq("failed")
+        expect(run.approvals.sole.decided_by).to eq("alice@example.com")
+      end
+
+      it "redirects back with nothing rejected, rather than raising, when the run has no pending gate" do
+        run = build_run
+
+        session = post("/belay/runs/#{run.id}/reject", by: "alice")
+
+        expect(session.response.status).to eq(302)
+      end
+
+      it "requires by: to be present" do
+        run = build_paused_run
+
+        session = post("/belay/runs/#{run.id}/reject", by: "")
+
+        expect(session.response.status).to eq(302)
+        session.follow_redirect!
+        expect(session.response.body).to include("who is rejecting this?")
+        expect(run.reload.status).to eq("paused")
+        expect(run.approvals.count).to eq(0)
       end
     end
   end

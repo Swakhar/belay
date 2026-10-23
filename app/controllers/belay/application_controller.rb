@@ -7,6 +7,15 @@ module Belay
   # whichever ones land will inherit this and get the same gate for free, rather
   # than each wiring its own before_action.
   class ApplicationController < ActionController::Base
+    # ActionController::Base inherits forgery protection from the HOST app's own
+    # default_protect_from_forgery config (true since Rails 5.2, via
+    # config.load_defaults) - true for any app on a remotely current
+    # load_defaults, but not guaranteed: a host app running Rails 7.1 gems while
+    # still pinned to an older load_defaults value wouldn't get it for free.
+    # Declared explicitly here, rather than assumed, now that the dashboard has
+    # its first mutating actions (approve!/reject!) to protect.
+    protect_from_forgery with: :exception
+
     before_action :authenticate_belay!
 
     private

@@ -33,3 +33,7 @@
 *.gem
 /Gemfile.lock
 /gemfiles/*.lock
+
+# Dashboard CSS build tooling (dev-only - npm run build:css). app/assets/belay/
+# application.css, the COMPILED output, is committed; this is not.
+/node_modules/

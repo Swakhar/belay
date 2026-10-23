@@ -1,0 +1,11 @@
+{
+  "name": "belay-dashboard-css",
+  "private": true,
+  "description": "Dev-only build tooling for the dashboard's CSS. Not a runtime dependency - end users of the belay gem never run npm; app/assets/belay/application.css is the committed, compiled output this produces.",
+  "scripts": {
+    "build:css": "tailwindcss -i ./tailwind/application.css -o ./app/assets/belay/application.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.0"
+  }
+}

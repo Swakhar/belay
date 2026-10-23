@@ -4,6 +4,7 @@
     <title>Belay</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <%= csrf_meta_tags %>
+    <style><%= raw Belay::Engine.stylesheet %></style>
   </head>
   <body>
     <% if notice %><p class="flash-notice"><%= notice %></p><% end %>

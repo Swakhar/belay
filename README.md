@@ -61,6 +61,8 @@ When a run is paused on a gate, its show page displays a form to `POST approve_r
 
 A `needs_review` step (orphaned by a crash, not declared `idempotent: true`) gets the same treatment: the show page's `POST resolve_run_path` takes `by:`, an `outcome:` of `"succeeded"` or `"failed"` (`Run#resolve_needs_review!`'s own `RESOLUTIONS`), and - only for `"succeeded"` - an optional JSON `output:`, since the step's own block never actually returned one to recover. `"succeeded"` resumes the run past it the same way `approve!` does; `"failed"` fails the run directly, the same way `reject!` does, rather than resuming into the executor's retry logic with this step's attempt count already at whatever it was when it crashed. No `Belay::Approval` row here - that model is scoped to gates specifically (including its unique-per-gate-step index); `belay_steps` gained its own `resolved_by`/`resolved_at` columns instead.
 
+The dashboard is styled with Tailwind, compiled and vendored - `app/assets/belay/application.css` is a committed build, inlined into the layout via `Belay::Engine.stylesheet`, not served through whichever asset pipeline (Sprockets, Propshaft, none at all) the host app happens to have, the same way this gem has never assumed Zeitwerk or any other host-app convention elsewhere. There's no runtime build step and no npm dependency for anyone who installs this gem. Contributing to the gem itself and changing a view's classes? `npm install && npm run build:css` regenerates it from `tailwind/application.css` - see `package.json`.
+
 ## Target API
 
 ```ruby

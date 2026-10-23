@@ -53,4 +53,21 @@ RSpec.describe Belay::Engine do
 
     expect(received).to be_a(ActionDispatch::Request)
   end
+
+  describe ".stylesheet" do
+    it "reads the committed, precompiled Tailwind build - not empty, not CSS source syntax" do
+      css = described_class.stylesheet
+
+      expect(css).not_to be_empty
+      expect(css).not_to include("@tailwind") # the SOURCE file's directives - this is the compiled output
+    end
+
+    it "is inlined into every rendered page, not linked" do
+      Belay.configure { |c| c.authenticate_with = ->(_request) { true } }
+
+      session = get("/belay/")
+
+      expect(session.response.body).to include("<style>#{described_class.stylesheet}</style>")
+    end
+  end
 end

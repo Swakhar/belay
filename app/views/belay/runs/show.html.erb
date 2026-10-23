@@ -1,91 +1,15 @@
-<h1>Run <%= @run.id %></h1>
-
-<p>
-  Workflow: <%= @run.workflow %> (<%= @run.workflow_version %>)<br>
-  Status: <%= @run.status %><br>
-  Started: <%= @run.started_at %><br>
-  Finished: <%= @run.finished_at %>
-</p>
+<%= render "belay/runs/header" %>
 
 <% if @run.pending_gate %>
-  <h2>Pending gate: <%= @run.pending_gate.name %></h2>
-
-  <%= form_with url: approve_run_path(@run), method: :post, local: true do |f| %>
-    <%= f.label :by, "Approved by" %>
-    <%= f.text_field :by %>
-    <%= f.label :edited_payload, "Edited payload (optional JSON)" %>
-    <%= f.text_area :edited_payload %>
-    <%= f.submit "Approve" %>
-  <% end %>
-
-  <%= form_with url: reject_run_path(@run), method: :post, local: true do |f| %>
-    <%= f.label :by, "Rejected by" %>
-    <%= f.text_field :by %>
-    <%= f.submit "Reject" %>
-  <% end %>
+  <%= render "belay/runs/pending_gate" %>
 <% end %>
 
 <% if @run.pending_needs_review %>
-  <h2>Needs review: <%= @run.pending_needs_review.name %></h2>
-  <p><%= @run.pending_needs_review.error&.dig("reason") %></p>
-
-  <%= form_with url: resolve_run_path(@run), method: :post, local: true do |f| %>
-    <%= f.hidden_field :outcome, value: "succeeded" %>
-    <%= f.label :by, "Resolved by" %>
-    <%= f.text_field :by %>
-    <%= f.label :output, "Output (optional JSON) - the step's own block never returned one" %>
-    <%= f.text_area :output %>
-    <%= f.submit "Mark succeeded" %>
-  <% end %>
-
-  <%= form_with url: resolve_run_path(@run), method: :post, local: true do |f| %>
-    <%= f.hidden_field :outcome, value: "failed" %>
-    <%= f.label :by, "Resolved by" %>
-    <%= f.text_field :by %>
-    <%= f.submit "Mark failed" %>
-  <% end %>
+  <%= render "belay/runs/pending_needs_review" %>
 <% end %>
 
-<h2>Steps</h2>
+<h2 class="mb-4 text-lg font-semibold text-slate-900">Steps</h2>
 
-<table>
-  <thead>
-    <tr>
-      <th>Position</th>
-      <th>Attempt</th>
-      <th>Name</th>
-      <th>Kind</th>
-      <th>Status</th>
-      <th>Prompt</th>
-      <th>Response</th>
-      <th>Model</th>
-      <th>Input tokens</th>
-      <th>Output tokens</th>
-      <th>Cost</th>
-      <th>Error</th>
-    </tr>
-  </thead>
-  <tbody>
-    <% @steps.each do |step| %>
-      <tr>
-        <td><%= step.position %></td>
-        <td><%= step.attempt %></td>
-        <td><%= step.name %></td>
-        <td><%= step.kind %></td>
-        <td><%= step.status %></td>
-        <td><%= step.input %></td>
-        <td><%= step.output %></td>
-        <td><%= step.model %></td>
-        <td><%= step.input_tokens %></td>
-        <td><%= step.output_tokens %></td>
-        <td><%= number_to_currency(step.cost_cents / 100.0) if step.cost_cents %></td>
-        <%# error isn't one consistent shape across this codebase: run_attempt's
-            own rescue writes {"class", "message"}, but flag_needs_review! and
-            Run#reject! both write {"reason"} instead - exactly the rows a human
-            opens this page to investigate (needs_review, a rejected gate), so
-            falling back to "reason" matters here, not just "message" alone. %>
-        <td><%= step.error&.dig("message") || step.error&.dig("reason") %></td>
-      </tr>
-    <% end %>
-  </tbody>
-</table>
+<div>
+  <%= render partial: "belay/runs/step", collection: @steps, as: :step %>
+</div>

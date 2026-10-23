@@ -1,0 +1,25 @@
+<div class="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-6">
+  <h2 class="mb-4 text-sm font-semibold text-amber-900">Pending gate: <%= @run.pending_gate.name %></h2>
+
+  <div class="flex flex-wrap gap-6">
+    <%= form_with url: approve_run_path(@run), method: :post, local: true, class: "min-w-60 flex-1 space-y-2" do |f| %>
+      <div>
+        <%= f.label :by, "Approved by", class: "field-label" %>
+        <%= f.text_field :by, class: "input-field" %>
+      </div>
+      <div>
+        <%= f.label :edited_payload, "Edited payload (optional JSON)", class: "field-label" %>
+        <%= f.text_area :edited_payload, class: "textarea-field", rows: 3 %>
+      </div>
+      <%= f.submit "Approve", class: "btn-primary" %>
+    <% end %>
+
+    <%= form_with url: reject_run_path(@run), method: :post, local: true, class: "min-w-60 flex-1 space-y-2" do |f| %>
+      <div>
+        <%= f.label :by, "Rejected by", class: "field-label" %>
+        <%= f.text_field :by, class: "input-field" %>
+      </div>
+      <%= f.submit "Reject", class: "btn-danger" %>
+    <% end %>
+  </div>
+</div>

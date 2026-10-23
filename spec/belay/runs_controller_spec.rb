@@ -99,10 +99,11 @@ RSpec.describe Belay::RunsController do
         expect(cells(session, "run-status")).to contain_exactly("running", "completed")
       end
 
-      it "renders with no runs at all, rather than erroring on an empty table" do
+      it "renders an empty state with no runs at all, rather than erroring on an empty table" do
         session = get("/belay/runs")
 
         expect(session.response.status).to eq(200)
+        expect(session.response.body).to include("No runs yet")
       end
 
       it "filters to only the given status" do

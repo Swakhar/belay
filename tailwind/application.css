@@ -1,3 +1,39 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/*
+ * A small, fixed set of reusable form/button components - not one-off utility
+ * strings repeated across every view. Picking a button or field once here,
+ * rather than per-template, is what keeps every page's controls consistent
+ * instead of drifting apart one Tailwind class string at a time.
+ */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md px-3 py-2 text-sm font-medium
+           transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-sky-600 text-white hover:bg-sky-700 focus:ring-sky-500;
+  }
+
+  .btn-secondary {
+    @apply btn border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 focus:ring-sky-500;
+  }
+
+  .btn-danger {
+    @apply btn bg-rose-600 text-white hover:bg-rose-700 focus:ring-rose-500;
+  }
+
+  .select-field,
+  .input-field,
+  .textarea-field {
+    @apply block w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900
+           focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500;
+  }
+
+  .field-label {
+    @apply mb-1 block text-sm font-medium text-slate-700;
+  }
+}

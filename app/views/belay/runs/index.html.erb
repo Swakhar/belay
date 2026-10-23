@@ -1,28 +1,42 @@
-<h1>Runs</h1>
+<div class="mb-6 flex items-center justify-between">
+  <h1 class="text-2xl font-semibold text-slate-900">Runs</h1>
 
-<%= form_with url: runs_path, method: :get, local: true do |f| %>
-  <%= f.select :status, options_for_select(@statuses, params[:status]), include_blank: "All statuses" %>
-  <%= f.select :workflow, options_for_select(@workflows, params[:workflow]), include_blank: "All workflows" %>
-  <%= f.submit "Filter" %>
+  <%= form_with url: runs_path, method: :get, local: true, class: "flex items-center gap-2" do |f| %>
+    <%= f.select :status, options_for_select(@statuses, params[:status]),
+                 { include_blank: "All statuses" }, class: "select-field" %>
+    <%= f.select :workflow, options_for_select(@workflows, params[:workflow]),
+                 { include_blank: "All workflows" }, class: "select-field" %>
+    <%= f.submit "Filter", class: "btn-secondary" %>
+  <% end %>
+</div>
+
+<% if @runs.any? %>
+  <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+    <table class="min-w-full divide-y divide-slate-200 text-sm">
+      <thead class="bg-slate-50">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium text-slate-500">Workflow</th>
+          <th class="px-4 py-2 text-left font-medium text-slate-500">Status</th>
+          <th class="px-4 py-2 text-left font-medium text-slate-500">Started</th>
+          <th class="px-4 py-2 text-left font-medium text-slate-500">Finished</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        <% @runs.each do |run| %>
+          <tr class="hover:bg-slate-50">
+            <td class="px-4 py-2">
+              <%= link_to run.workflow, run_path(run), class: "run-workflow font-medium text-sky-700 hover:underline" %>
+            </td>
+            <td class="run-status px-4 py-2"><%= status_badge(run.status) %></td>
+            <td class="px-4 py-2 text-slate-500"><%= run.started_at %></td>
+            <td class="px-4 py-2 text-slate-500"><%= run.finished_at %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+<% else %>
+  <div class="rounded-lg border border-dashed border-slate-300 bg-white px-6 py-12 text-center">
+    <p class="text-sm text-slate-500">No runs yet.</p>
+  </div>
 <% end %>
-
-<table>
-  <thead>
-    <tr>
-      <th>Workflow</th>
-      <th>Status</th>
-      <th>Started</th>
-      <th>Finished</th>
-    </tr>
-  </thead>
-  <tbody>
-    <% @runs.each do |run| %>
-      <tr>
-        <td><%= link_to run.workflow, run_path(run), class: "run-workflow" %></td>
-        <td class="run-status"><%= run.status %></td>
-        <td><%= run.started_at %></td>
-        <td><%= run.finished_at %></td>
-      </tr>
-    <% end %>
-  </tbody>
-</table>

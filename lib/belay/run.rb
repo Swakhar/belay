@@ -351,6 +351,21 @@ module Belay
     # review: comparing a present original.output against a nil
     # replay_output (because the shadow raised before reaching this position)
     # looked identical to a genuine change otherwise.
+    #
+    # Known, accepted gap: replayed: can read true for a non-llm position the
+    # shadow's Executor never actually dispatched. seed_recorded_steps! writes
+    # every non-llm position's row up front, before Executor.new(shadow).call
+    # ever starts, independent of where live execution (an llm_call position)
+    # later halts - so a non-llm position physically AFTER that halt still has
+    # a row, and still reports replayed: true. changed: is still correct
+    # either way (a pre-seeded row is always a verbatim copy, never actually
+    # different), so nothing is ever reported as "unchanged" that genuinely
+    # differs - but replayed: alone can't be trusted to mean "live execution
+    # actually reached this far" for a replay that failed partway through.
+    # Telling the two apart for real would mean seeding non-llm rows lazily,
+    # interleaved with execution, instead of all at once - a real redesign,
+    # not a small fix, for a narrow case (reading this on a replay that
+    # didn't complete).
     def diff_entry(position, original_attempts)
       original = original_attempts.max_by(&:attempt)
       mine = steps.find_by(position: position)

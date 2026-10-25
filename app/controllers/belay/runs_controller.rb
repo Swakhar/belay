@@ -37,6 +37,17 @@ module Belay
       @steps = @run.steps.order(:position, :attempt)
     end
 
+    # replay_diff itself raises a plain Belay::Error (not a 404) for a run
+    # that isn't a replay at all - caught here the same way approve!/reject!/
+    # resolve_needs_review!'s own errors are, rather than letting a stray
+    # /belay/runs/:id/diff on an ordinary run 500.
+    def diff
+      @run = Run.find(params[:id])
+      @diff = @run.replay_diff
+    rescue Error => e
+      redirect_with(alert: e.message)
+    end
+
     # by: is a plain form field, not derived from the authenticated request -
     # authenticate_with only ever answers "is this request allowed," not "who
     # is making it" (see ApplicationController's own comment on that), so this

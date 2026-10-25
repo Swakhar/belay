@@ -70,6 +70,21 @@ RSpec.describe Belay::RunsController do
     Belay::Run.create!({ workflow: workflow, workflow_version: "v1", status: status }.merge(attrs))
   end
 
+  def configure_fake_provider(*responses)
+    Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: responses) }
+  end
+
+  def build_replayable_run
+    stub_const("RunsControllerSpecReplayWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) { |ctx| ctx.llm(model: "x", prompt: "y") }
+      step(:verify) { |_ctx| { checked: true } }
+    end)
+    Belay::Run.create!(workflow: "RunsControllerSpecReplayWorkflow",
+                       workflow_version: RunsControllerSpecReplayWorkflow.workflow_version,
+                       input: { invoice_id: 1 }).tap { |run| Belay::Executor.new(run).call }
+  end
+
   def build_step(run, **attrs)
     defaults = { name: "extract", position: 0, attempt: 1, status: "succeeded", kind: "decision" }
     attrs = defaults.merge(attrs)
@@ -431,6 +446,91 @@ RSpec.describe Belay::RunsController do
         session.follow_redirect!
         expect(session.response.body).to include("who is resolving this?")
         expect(run.reload.pending_needs_review).not_to be_nil
+      end
+    end
+  end
+
+  describe "#show for a replay shadow run" do
+    before { Belay.configure { |c| c.authenticate_with = ->(_request) { true } } }
+    after { Belay.reset_config! }
+
+    it "links back to the original it was replayed from" do
+      configure_fake_provider({ "total_cents" => 1 }, { "total_cents" => 2 })
+      original = build_replayable_run
+      shadow = original.replay(model: "claude-opus-5-5")
+
+      session = get("/belay/runs/#{shadow.id}")
+
+      expect(session.response.body).to include("Replayed from").and include(original.id)
+    end
+
+    it "lists its replays, each linking to its own diff view" do
+      configure_fake_provider({ "total_cents" => 1 }, { "total_cents" => 2 })
+      original = build_replayable_run
+      shadow = original.replay(model: "claude-opus-5-5")
+
+      session = get("/belay/runs/#{original.id}")
+
+      expect(session.response.body).to include("Replays").and include(shadow.id)
+    end
+
+    it "does not render needs_review resolve, even for a replay shadow with a genuine pending_needs_review row" do
+      configure_fake_provider({ "total_cents" => 1 })
+      stub_const("RunsControllerSpecReplayFailWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| ctx.llm(model: "x", prompt: "y") }
+        step(:book) { |_ctx| raise "boom" }
+      end)
+      run = Belay::Run.create!(workflow: "RunsControllerSpecReplayFailWorkflow",
+                               workflow_version: RunsControllerSpecReplayFailWorkflow.workflow_version,
+                               input: { invoice_id: 1 })
+      expect { Belay::Executor.new(run).call }.to raise_error("boom")
+      configure_fake_provider({ "total_cents" => 1 })
+      shadow = begin
+        run.replay(model: "claude-opus-5-5")
+      rescue Belay::Error
+        Belay::Run.where(replay_of_id: run.id).sole
+      end
+      expect(shadow.pending_needs_review).not_to be_nil # sanity - this is the exact scenario being guarded against
+
+      session = get("/belay/runs/#{shadow.id}")
+
+      expect(session.response.body).not_to include("Needs review")
+    end
+  end
+
+  describe "#diff" do
+    it "requires authentication" do
+      run = build_run
+
+      expect { get("/belay/runs/#{run.id}/diff") }.to raise_error(Belay::Error, /authenticate_with/)
+    end
+
+    context "once authenticated" do
+      before { Belay.configure { |c| c.authenticate_with = ->(_request) { true } } }
+      after { Belay.reset_config! }
+
+      it "shows each step's original and replay output side by side" do
+        configure_fake_provider({ "total_cents" => 4200 }, { "total_cents" => 9999 })
+        original = build_replayable_run
+        shadow = original.replay(model: "claude-opus-5-5")
+
+        session = get("/belay/runs/#{shadow.id}/diff")
+
+        expect(session.response.status).to eq(200)
+        doc = Nokogiri::HTML(session.response.body)
+        statuses = doc.css(".diff-status").map(&:text).map(&:strip)
+        expect(statuses).to include("changed").and include("unchanged")
+      end
+
+      it "redirects back with a flash alert, rather than a raw 500, for a run that isn't a replay" do
+        run = build_run
+
+        session = get("/belay/runs/#{run.id}/diff")
+
+        expect(session.response.status).to eq(302)
+        session.follow_redirect!
+        expect(session.response.body).to include("is not a replay")
       end
     end
   end

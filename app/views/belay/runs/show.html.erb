@@ -1,10 +1,26 @@
 <%= render "belay/runs/header" %>
 
+<% if @run.replay_of %>
+  <%= render "belay/runs/replayed_from" %>
+<% end %>
+
+<% if @run.replays.any? %>
+  <%= render "belay/runs/replays" %>
+<% end %>
+
 <% if @run.pending_gate %>
   <%= render "belay/runs/pending_gate" %>
 <% end %>
 
-<% if @run.pending_needs_review %>
+<%# Not rendered for a replay shadow (@run.replay_of present) even if it has
+    one: resolve_needs_review! expects a run flag_needs_review! actually
+    paused, which seeding a shadow's rows never does - calling it here would
+    either raise a confusing InvalidTransitionError or, for outcome: "failed",
+    silently "resolve" a run that was never really awaiting a human in the
+    first place. A shadow's needs_review row means "the original didn't
+    cleanly pass this point, reproduced for visibility" - look at #replay_of
+    to resolve the real thing, not this mirror of it. %>
+<% if @run.pending_needs_review && !@run.replay_of %>
   <%= render "belay/runs/pending_needs_review" %>
 <% end %>
 

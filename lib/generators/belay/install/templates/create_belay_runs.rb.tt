@@ -14,6 +14,16 @@ class CreateBelayRuns < ActiveRecord::Migration[<%= ActiveRecord::Migration.curr
       t.jsonb :error
       t.datetime :started_at
       t.datetime :finished_at
+      # Both nil for an ordinary run - only set on a shadow run created by
+      # Run#replay. replay_of_id is a self-referential FK (added below, after
+      # create_table - Postgres can't reference a table from inside its own
+      # creation), not a NOT NULL/required column: most runs are not replays.
+      # replay_model is the model: override Run#replay was given, threaded
+      # through to Context#llm by Executor::StepRunner#build_context - a
+      # replayed llm_call step's own hardcoded model: in the workflow body is
+      # a default this overrides, not something replay edits in place.
+      t.uuid :replay_of_id
+      t.string :replay_model
 
       t.timestamps
     end
@@ -21,5 +31,7 @@ class CreateBelayRuns < ActiveRecord::Migration[<%= ActiveRecord::Migration.curr
     add_index :belay_runs, :idempotency_key, unique: true
     add_index :belay_runs, [:status, :lease_expires_at]
     add_index :belay_runs, :workflow
+    add_foreign_key :belay_runs, :belay_runs, column: :replay_of_id
+    add_index :belay_runs, :replay_of_id
   end
 end

@@ -5,6 +5,24 @@ RSpec.describe Belay::Run do
     described_class.create!({ workflow: "InvoiceWorkflow", workflow_version: "v1" }.merge(attrs))
   end
 
+  describe "#replay_of / #replays" do
+    it "defaults to no replay_of, for an ordinary run" do
+      run = build_run
+
+      expect(run.replay_of).to be_nil
+      expect(run.replays).to be_empty
+    end
+
+    it "associates a shadow run back to the original it was replayed from" do
+      original = build_run
+      shadow = build_run(replay_of: original, replay_model: "claude-opus-5-5")
+
+      expect(shadow.replay_of).to eq(original)
+      expect(original.replays).to eq([shadow])
+      expect(shadow.replay_model).to eq("claude-opus-5-5")
+    end
+  end
+
   describe "persistence" do
     it "requires workflow and workflow_version" do
       expect { described_class.create!(workflow_version: "v1") }.to raise_error(ActiveRecord::RecordInvalid)

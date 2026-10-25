@@ -34,10 +34,12 @@ RSpec.describe Belay::Generators::InstallGenerator do
 
     expect(content).to include("create_table :belay_runs, id: :uuid")
     %w[workflow workflow_version input status current_position idempotency_key
-       lease_owner lease_expires_at error started_at finished_at].each do |column|
+       lease_owner lease_expires_at error started_at finished_at
+       replay_of_id replay_model].each do |column|
       expect(content).to include(":#{column}")
     end
     expect(content).to include("add_index :belay_runs, :idempotency_key, unique: true")
+    expect(content).to include("add_foreign_key :belay_runs, :belay_runs, column: :replay_of_id")
   end
 
   it "creates a timestamped belay_steps migration that is syntactically valid Ruby" do

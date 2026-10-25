@@ -7,6 +7,14 @@ module Belay
     has_many :steps, class_name: "Belay::Step"
     has_many :approvals, class_name: "Belay::Approval"
 
+    # Explicit class_name/foreign_key/optional: for the same reason every other
+    # association on this model states them explicitly - no Zeitwerk/app-
+    # autoloading to infer the namespace from, and most runs are not a replay
+    # of anything (optional: false would be wrong here, unlike Step's belongs_to
+    # :run above).
+    belongs_to :replay_of, class_name: "Belay::Run", optional: true
+    has_many :replays, class_name: "Belay::Run", foreign_key: :replay_of_id, inverse_of: :replay_of
+
     # The two outcomes resolve_needs_review! accepts - see its own comment below.
     RESOLUTIONS = %w[succeeded failed].freeze
 

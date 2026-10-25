@@ -124,6 +124,26 @@ RSpec.describe Belay::Context do
       expect(provider.calls.sole).to eq(model: "claude-sonnet-5-5", prompt: "extract", schema: schema)
     end
 
+    it "calls model_override instead of model: when one was given - Run#replay's whole mechanism" do
+      provider = Belay::FakeProvider.new(responses: ["x"])
+      Belay.configure { |c| c.provider = provider }
+      ctx = described_class.new(model_override: "claude-opus-5-5")
+
+      ctx.llm(model: "claude-sonnet-5-5", prompt: "hi")
+
+      expect(provider.calls.sole[:model]).to eq("claude-opus-5-5")
+    end
+
+    it "uses model: as-is when no model_override was given - the common, non-replay case" do
+      provider = Belay::FakeProvider.new(responses: ["x"])
+      Belay.configure { |c| c.provider = provider }
+      ctx = described_class.new
+
+      ctx.llm(model: "claude-sonnet-5-5", prompt: "hi")
+
+      expect(provider.calls.sole[:model]).to eq("claude-sonnet-5-5")
+    end
+
     describe "schema validation" do
       let(:schema) do
         { "type" => "object", "properties" => { "total_cents" => { "type" => "integer" } },

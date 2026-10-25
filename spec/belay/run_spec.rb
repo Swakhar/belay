@@ -531,4 +531,113 @@ RSpec.describe Belay::Run do
       expect(step.reload.status).to eq("succeeded") # unchanged - not overwritten back to failed
     end
   end
+
+  # Exercises the real Executor on both the original and the shadow run,
+  # same reasoning build_paused_run/build_run_with_needs_review above give -
+  # this proves replay against exactly what a real run leaves behind, not an
+  # approximation of it.
+  def build_replayable_run(gate_calls: nil)
+    stub_const("RunSpecReplayWorkflow", Class.new(Belay::Workflow) do
+      input :invoice_id
+      step(:extract) { |ctx| ctx.llm(model: "claude-sonnet-5-5", prompt: "extract #{ctx.invoice_id}") }
+      step(:verify) { |_ctx| { checked: true } }
+      gate(:approval, when: lambda { |ctx|
+        gate_calls&.call
+        ctx.extract["total_cents"] > 100_00
+      })
+      step(:book) { |_ctx| { booked: true } }
+    end)
+    RunSpecReplayWorkflow.start(invoice_id: 7, idempotency_key: "replay-spec-#{SecureRandom.uuid}")
+  end
+
+  def configure_fake_provider(*responses)
+    Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: responses) }
+  end
+
+  describe "#replay" do
+    after { Belay.reset_config! }
+
+    it "re-runs llm_call steps for real with model_override, serving everything else from the recorded output" do
+      configure_fake_provider({ "total_cents" => 4200 }, { "total_cents" => 9999 })
+      original = build_replayable_run
+
+      shadow = original.replay(model: "claude-opus-5-5")
+
+      expect(shadow.steps.find_by(name: "extract"))
+        .to have_attributes(model: "claude-opus-5-5", output: { "total_cents" => 9999 })
+      expect(shadow.steps.find_by(name: "verify").output).to eq(original.steps.find_by(name: "verify").output)
+      expect(shadow.steps.find_by(name: "book").output).to eq(original.steps.find_by(name: "book").output)
+    end
+
+    it "reuses the recorded gate decision without re-evaluating when:" do
+      calls = 0
+      configure_fake_provider({ "total_cents" => 4200 }, { "total_cents" => 4200 })
+      original = build_replayable_run(gate_calls: -> { calls += 1 })
+      expect(calls).to eq(1) # the original run's own evaluation
+
+      original.replay(model: "claude-opus-5-5")
+
+      expect(calls).to eq(1) # unchanged - the shadow run never re-evaluated when:
+    end
+
+    it "copies the gate's recorded output, not just its status, for a gate approved with an edited payload" do
+      configure_fake_provider({ "total_cents" => 20_000 }, { "total_cents" => 20_000 })
+      original = build_replayable_run # total_cents > 100_00, so the gate pauses
+      original.approve!(by: "reviewer", edited_payload: { total_cents: 50_000 })
+
+      shadow = original.replay(model: "claude-opus-5-5")
+
+      expect(shadow.steps.find_by(name: "approval").output).to eq("total_cents" => 50_000)
+    end
+
+    it "stops the shadow run where the original was rejected, rather than guessing past it" do
+      configure_fake_provider({ "total_cents" => 20_000 }, { "total_cents" => 20_000 })
+      original = build_replayable_run
+      original.reject!(by: "reviewer")
+
+      expect { original.replay(model: "claude-opus-5-5") }.to raise_error(Belay::Error, /failed on its final attempt/)
+    end
+
+    it "refuses to replay when the workflow definition has changed since this run" do
+      configure_fake_provider({ "total_cents" => 4200 })
+      original = build_replayable_run
+      stub_const("RunSpecReplayWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| ctx.llm(model: "x", prompt: "y") }
+        step(:verify) { |_ctx| true }
+        step(:a_whole_new_step) { |_ctx| true } # changes workflow_version
+        gate(:approval, when: ->(_ctx) { false })
+        step(:book) { |_ctx| true }
+      end)
+
+      expect { original.replay(model: "claude-opus-5-5") }
+        .to raise_error(Belay::Error, /workflow definition has changed/)
+    end
+  end
+
+  describe "#replay_diff" do
+    after { Belay.reset_config! }
+
+    it "raises if this run is not a replay" do
+      run = build_run
+
+      expect { run.replay_diff }.to raise_error(Belay::Error, /not a replay/)
+    end
+
+    it "flags the llm_call step as changed when the override model produced a different output" do
+      configure_fake_provider({ "total_cents" => 4200 }, { "total_cents" => 9999 })
+      original = build_replayable_run
+
+      shadow = original.replay(model: "claude-opus-5-5")
+      diff = shadow.replay_diff
+
+      extract_diff = diff.find { |d| d[:name] == "extract" }
+      expect(extract_diff[:original_output]).to eq("total_cents" => 4200)
+      expect(extract_diff[:replay_output]).to eq("total_cents" => 9999)
+      expect(extract_diff[:changed]).to be true
+
+      verify_diff = diff.find { |d| d[:name] == "verify" }
+      expect(verify_diff[:changed]).to be false
+    end
+  end
 end

@@ -271,6 +271,43 @@ module Belay
       outcome == "succeeded" ? resolve_succeeded!(step, by: by, output: output) : resolve_failed!(step, by: by)
     end
 
+    # Creates a shadow run: a fresh Run with the same workflow/workflow_version/
+    # input as this one, re-executing every llm_call step for real (with
+    # model_override: if given - see Context#llm) while serving every other
+    # step (decision, tool_call, and gate alike - no special-casing needed, a
+    # gate is just kind: "gate") from THIS run's own recorded output, never
+    # re-running its block. DESIGN_DECISIONS #8: replay compares extractions,
+    # it doesn't book the invoice a second time.
+    #
+    # Runs the shadow synchronously, inline, the same way Workflow.start does -
+    # no job enqueued, no lease taken. Executor.new(shadow).call is never
+    # rescued here: seed_recorded_steps! below has already written whatever
+    # rows it's going to write by the time the executor runs, so a caller
+    # gets the same raised error a fresh run's own failure would give, with
+    # the shadow run's state still fully inspectable afterward either way.
+    def replay(model: nil)
+      refuse_unless_replayable!
+
+      shadow = self.class.create!(workflow: workflow, workflow_version: workflow_version, input: input,
+                                  replay_of: self, replay_model: model)
+      seed_recorded_steps!(shadow)
+      Executor.new(shadow).call
+      shadow
+    end
+
+    # Every step in this run whose kind isn't "llm_call" - decision, tool_call,
+    # gate alike - compared against the same position in replay_of's run.
+    # changed: is a plain != on the two outputs, not a deep diff of exactly
+    # what moved inside them - good enough to answer "did this step's result
+    # change," the question replay exists to answer; rendering exactly what's
+    # different inside a Hash is a dashboard-view concern, not this method's.
+    def replay_diff
+      raise Error, "belay_runs##{id} is not a replay - it has no replay_of" if replay_of.nil?
+
+      by_position = replay_of.steps.group_by(&:position)
+      by_position.keys.sort.map { |position| diff_entry(position, by_position.fetch(position)) }
+    end
+
     private
 
     def resolve_succeeded!(step, by:, output:)
@@ -306,6 +343,61 @@ module Belay
       raise Error, "belay_runs##{id} has no pending gate to #{action}" if gate.nil?
 
       gate
+    end
+
+    def diff_entry(position, original_attempts)
+      original = original_attempts.max_by(&:attempt)
+      mine = steps.find_by(position: position)
+      { position: position, name: original.name, kind: original.kind, original_output: original.output,
+        replay_output: mine&.output, changed: original.output != mine&.output }
+    end
+
+    def refuse_unless_replayable!
+      current_version = workflow_class_for_replay.workflow_version
+      return if current_version == workflow_version
+
+      raise Error, "belay_runs##{id} ran against workflow_version #{workflow_version.inspect}, but " \
+                   "#{workflow} is now at #{current_version.inspect} - the workflow definition has " \
+                   "changed since this run, so replaying it would compare against a step list that " \
+                   "no longer matches"
+    end
+
+    # Same clear-error-on-a-bad-constant shape as Executor's own private
+    # workflow_class (executor.rb) - not reused directly since that method
+    # reads @run, an Executor ivar this is a different class entirely, and
+    # duplicating three lines here is simpler than extracting a shared helper
+    # for the only two call sites that need it.
+    def workflow_class_for_replay
+      workflow.constantize
+    rescue NameError => e
+      raise Error, "belay_runs##{id} names workflow #{workflow.inspect}, which isn't a loadable constant " \
+                   "(#{e.message})"
+    end
+
+    # Copies every non-llm_call step's FINAL attempt (not every attempt - a
+    # shadow run doesn't need to replay retries that happened, just the
+    # outcome that mattered) into the shadow run, before Executor ever runs
+    # it. The executor's own dispatch - completely unmodified - already
+    # reuses a succeeded/skipped row's output without re-running its block,
+    # and already raises on a pre-seeded failed/needs_review row via its
+    # existing retry_or_raise/unsafe_to_rerun_error paths. That's the entire
+    # mechanism behind "serve tool/non-LLM steps from recorded outputs" and
+    # "reuse recorded gate decisions" - a gate needs no special-casing here
+    # because it's just another kind: that isn't "llm_call".
+    #
+    # idempotency_key's format ("#{run.id}:#{position}") duplicates
+    # Executor::StepRunner's own private method of the same shape - a
+    # different class, and copying a one-line string format is simpler than
+    # plumbing a shared helper for it.
+    def seed_recorded_steps!(shadow)
+      steps.group_by(&:position).each do |position, attempts|
+        original = attempts.max_by(&:attempt)
+        next if original.kind == "llm_call"
+
+        shadow.steps.create!(position: position, name: original.name, kind: original.kind,
+                             status: original.status, output: original.output, error: original.error,
+                             idempotency_key: "#{shadow.id}:#{position}")
+      end
     end
 
     # Each bang method declares its own required source status(es), rather than checking

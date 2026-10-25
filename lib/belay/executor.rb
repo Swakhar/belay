@@ -297,7 +297,8 @@ module Belay
         Context.new(
           input: @run.input,
           outputs: step_run.outputs,
-          step_idempotency_key: idempotency_key(step_run.position)
+          step_idempotency_key: idempotency_key(step_run.position),
+          model_override: @run.replay_model
         )
       end
 

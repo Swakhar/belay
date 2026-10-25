@@ -36,10 +36,15 @@ module Belay
 
     attr_reader :input, :outputs, :step_idempotency_key
 
-    def initialize(input: {}, outputs: {}, step_idempotency_key: nil)
+    # model_override: is Run#replay(model:)'s whole mechanism - nil for every
+    # ordinary run (the common case: #llm just uses whatever model: the step's
+    # own block passed). Executor::StepRunner#build_context is the only real
+    # caller that ever passes one, reading it off @run.replay_model.
+    def initialize(input: {}, outputs: {}, step_idempotency_key: nil, model_override: nil)
       @input = symbolize_without_collision!(input, "input")
       @outputs = symbolize_without_collision!(outputs, "prior step output")
       @step_idempotency_key = step_idempotency_key
+      @model_override = model_override
       # Mutated in place by #llm below, not reassigned - this object freezes itself
       # at the end of #initialize, which would make `@llm_metadata = ...` raise
       # FrozenError from inside #llm. Mutating the Hash this ivar already points to
@@ -66,9 +71,14 @@ module Belay
     # deep-stringified below first) and set additionalProperties: false on every
     # object, per Anthropic's own requirement for the same schema when a provider
     # like AnthropicProvider forwards it as output_config.format.schema.
+    # model: passed here is a default, not the final word - model_override
+    # (set only on a replay's shadow run) takes precedence, so a replayed
+    # llm_call step actually calls the overriding model without the workflow
+    # body itself needing to know anything about replay.
     def llm(model:, prompt:, schema: nil)
+      effective_model = @model_override || model
       provider = resolve_provider!
-      response = provider.call(model: model, prompt: prompt, schema: schema)
+      response = provider.call(model: effective_model, prompt: prompt, schema: schema)
 
       # Recorded before validating, not after: provider.call above already made a
       # real, billed request by the time we know whether its content matches

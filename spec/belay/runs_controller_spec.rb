@@ -257,6 +257,19 @@ RSpec.describe Belay::RunsController do
 
         expect(session.response.body).to include("not idempotent")
       end
+
+      # Regression tripwire for show.html.erb's needs_review-hiding condition
+      # (added for replay shadows) - confirms the "&& !@run.replay_of" half
+      # never accidentally hides this for an ORDINARY run, which has no
+      # replay_of at all. This is the dashboard's only way to resolve a real
+      # needs_review step, so losing it silently would be a real regression.
+      it "shows the needs_review resolve section for an ordinary run (no replay_of) with a real pending_needs_review" do
+        run = build_run_with_needs_review
+
+        session = get("/belay/runs/#{run.id}")
+
+        expect(session.response.body).to include("Needs review")
+      end
     end
   end
 
@@ -521,6 +534,38 @@ RSpec.describe Belay::RunsController do
         doc = Nokogiri::HTML(session.response.body)
         statuses = doc.css(".diff-status").map(&:text).map(&:strip)
         expect(statuses).to include("changed").and include("unchanged")
+      end
+
+      # The one UI branch in diff.html.erb (diff_entry's replayed: false,
+      # found by review on the prior commit) that the test above never
+      # exercises - reproduced here the real way: a replay whose provider
+      # runs out of scripted responses partway through, so a later llm_call
+      # step is never dispatched at all, exactly as it would be for a real
+      # model/provider error partway through a replay.
+      it "shows 'not reached' for a step the shadow's own replay never got to" do
+        configure_fake_provider({ "total_cents" => 1 }, { "total_cents" => 2 }, { "total_cents" => 3 })
+        stub_const("RunsControllerSpecReplayHaltWorkflow", Class.new(Belay::Workflow) do
+          input :invoice_id
+          step(:first) { |ctx| ctx.llm(model: "x", prompt: "a") }
+          step(:second) { |ctx| ctx.llm(model: "x", prompt: "b") }
+          step(:third) { |ctx| ctx.llm(model: "x", prompt: "c") }
+        end)
+        original = Belay::Run.create!(workflow: "RunsControllerSpecReplayHaltWorkflow",
+                                      workflow_version: RunsControllerSpecReplayHaltWorkflow.workflow_version,
+                                      input: { invoice_id: 1 })
+        Belay::Executor.new(original).call
+        configure_fake_provider({ "total_cents" => 9 }) # only enough for :first - :second then halts replay
+        shadow = begin
+          original.replay(model: "claude-opus-5-5")
+        rescue Belay::FakeProvider::ScriptExhaustedError
+          Belay::Run.where(replay_of_id: original.id).sole
+        end
+
+        session = get("/belay/runs/#{shadow.id}/diff")
+
+        doc = Nokogiri::HTML(session.response.body)
+        statuses = doc.css(".diff-status").map(&:text).map(&:strip)
+        expect(statuses).to include("not reached")
       end
 
       it "redirects back with a flash alert, rather than a raw 500, for a run that isn't a replay" do

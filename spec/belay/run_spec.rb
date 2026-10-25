@@ -551,7 +551,9 @@ RSpec.describe Belay::Run do
   end
 
   def configure_fake_provider(*responses)
-    Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: responses) }
+    provider = Belay::FakeProvider.new(responses: responses)
+    Belay.configure { |c| c.provider = provider }
+    provider
   end
 
   describe "#replay" do
@@ -595,7 +597,66 @@ RSpec.describe Belay::Run do
       original = build_replayable_run
       original.reject!(by: "reviewer")
 
-      expect { original.replay(model: "claude-opus-5-5") }.to raise_error(Belay::Error, /failed on its final attempt/)
+      expect { original.replay(model: "claude-opus-5-5") }.to raise_error(Belay::Error, /needs_review/)
+      shadow = Belay::Run.where(replay_of_id: original.id).sole
+      expect(shadow.steps.find_by(name: "approval").status).to eq("needs_review")
+    end
+
+    # The bug this guards against (caught by review before this landed): the
+    # first draft seeded an unresolved non-llm step as "failed" verbatim,
+    # whose fate under dispatch's retry_or_raise depends on the CURRENT
+    # workflow's retries: option - which workflow_version does NOT hash. A
+    # step innocently gaining retries: between when it originally ran and
+    # replay time made dispatch silently RE-EXECUTE the block for real,
+    # repeating whatever side effect it has - exactly what replay must never
+    # do. Seeding it as needs_review instead (unconditional raise, no
+    # retries: interaction at all) closes this regardless of what the
+    # CURRENT workflow declares.
+    it "never re-executes an ordinary step's block, even if the CURRENT workflow now declares retries: for it" do
+      configure_fake_provider({ "total_cents" => 4200 })
+      stub_const("RunSpecReplayRetriesWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| ctx.llm(model: "x", prompt: "y") }
+        step(:book) { |_ctx| raise "boom" }
+      end)
+      run = Belay::Run.create!(workflow: "RunSpecReplayRetriesWorkflow",
+                               workflow_version: RunSpecReplayRetriesWorkflow.workflow_version,
+                               input: { invoice_id: 1 })
+      expect { Belay::Executor.new(run).call }.to raise_error("boom")
+      run.reload
+
+      book_calls = 0
+      stub_const("RunSpecReplayRetriesWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| ctx.llm(model: "x", prompt: "y") }
+        step(:book, retries: 2) do |_ctx|
+          book_calls += 1
+          raise "boom"
+        end
+      end)
+      configure_fake_provider({ "total_cents" => 4200 }) # one more call - the shadow's real :extract re-run
+
+      expect { run.replay(model: "claude-opus-5-5") }.to raise_error(Belay::Error, /needs_review/)
+      expect(book_calls).to eq(0) # never ran again - the bug this test guards against
+    end
+
+    it "honors an explicitly-declared kind: over what the step actually did at runtime" do
+      provider = configure_fake_provider({ "total_cents" => 4200 })
+      stub_const("RunSpecReplayExplicitKindWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        # kind: "tool_call" declared explicitly even though the block also
+        # calls ctx.llm - explicit kind: is never overridden (same rule the
+        # executor itself applies to a live run), so replay must serve this
+        # from its recorded output rather than calling the provider again.
+        step(:extract, kind: "tool_call") { |ctx| ctx.llm(model: "x", prompt: "y") }
+      end)
+      run = RunSpecReplayExplicitKindWorkflow.start(invoice_id: 1,
+                                                    idempotency_key: "replay-kind-#{SecureRandom.uuid}")
+
+      shadow = run.replay(model: "claude-opus-5-5")
+
+      expect(provider.calls.size).to eq(1) # only the original's call - replay never called ctx.llm again
+      expect(shadow.steps.find_by(name: "extract").output).to eq(run.steps.find_by(name: "extract").output)
     end
 
     it "refuses to replay when the workflow definition has changed since this run" do

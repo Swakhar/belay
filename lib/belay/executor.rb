@@ -181,8 +181,8 @@ module Belay
 
       def unsafe_to_rerun_error(step_run, existing)
         Error.new(
-          "belay_steps##{existing.id} at position #{step_run.position} is needs_review - a human needs to " \
-          "resolve it first (no resolve-and-resume action exists yet - that's dashboard work, Phase 2)"
+          "belay_steps##{existing.id} at position #{step_run.position} is needs_review - resolve it via " \
+          "run.resolve_needs_review! first"
         )
       end
 

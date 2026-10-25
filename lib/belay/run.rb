@@ -345,11 +345,18 @@ module Belay
       gate
     end
 
+    # replayed: false (and changed: false, not true) when the shadow never
+    # reached this position at all - distinct from "it ran and produced the
+    # same output" and from "it ran and produced a different one." Found by
+    # review: comparing a present original.output against a nil
+    # replay_output (because the shadow raised before reaching this position)
+    # looked identical to a genuine change otherwise.
     def diff_entry(position, original_attempts)
       original = original_attempts.max_by(&:attempt)
       mine = steps.find_by(position: position)
+      replayed = !mine.nil?
       { position: position, name: original.name, kind: original.kind, original_output: original.output,
-        replay_output: mine&.output, changed: original.output != mine&.output }
+        replay_output: mine&.output, replayed: replayed, changed: replayed && original.output != mine.output }
     end
 
     def refuse_unless_replayable!
@@ -374,16 +381,54 @@ module Belay
                    "(#{e.message})"
     end
 
+    # Whether `position` should be re-executed fresh (true, an llm_call step)
+    # rather than served from the recorded output (false). The CURRENT
+    # workflow class's own declared kind: wins when the author stated one
+    # explicitly - :gate always counts, nil never does, same "explicit kind:
+    # is never overridden" rule the executor itself already applies to a
+    # live run - falling back to what actually happened when this position
+    # last ran only when the author declared no kind: at all. refuse_unless_
+    # replayable! having already passed guarantees that wherever the CURRENT
+    # class DOES declare a kind: explicitly, it's identical to whatever ran
+    # originally (workflow_version hashes exactly that pair, per .step's own
+    # comment) - so the only real ambiguity left is a step with no explicit
+    # kind: declared on either version, where runtime behavior (whether the
+    # block calls ctx.llm) silently changed. That's a real, accepted
+    # limitation, not solved here: workflow_version hashes declared kind, not
+    # runtime behavior, by design, so it can't catch this either. Authors who
+    # want a step's llm/non-llm nature to stay replay-safe across such a
+    # change should declare kind: explicitly.
+    def llm_position?(position, original)
+      declared = workflow_class_for_replay.steps[position]&.kind
+      return declared.to_s == "llm_call" if declared
+
+      original.kind == "llm_call"
+    end
+
     # Copies every non-llm_call step's FINAL attempt (not every attempt - a
     # shadow run doesn't need to replay retries that happened, just the
     # outcome that mattered) into the shadow run, before Executor ever runs
     # it. The executor's own dispatch - completely unmodified - already
-    # reuses a succeeded/skipped row's output without re-running its block,
-    # and already raises on a pre-seeded failed/needs_review row via its
-    # existing retry_or_raise/unsafe_to_rerun_error paths. That's the entire
-    # mechanism behind "serve tool/non-LLM steps from recorded outputs" and
-    # "reuse recorded gate decisions" - a gate needs no special-casing here
-    # because it's just another kind: that isn't "llm_call".
+    # reuses a succeeded/skipped row's output without re-running its block.
+    # That's the entire mechanism behind "serve tool/non-LLM steps from
+    # recorded outputs" and "reuse recorded gate decisions" - a gate needs no
+    # special-casing because it's just another kind: that isn't "llm_call".
+    #
+    # A non-llm step whose recorded status ISN'T succeeded/skipped (an
+    # ordinary step genuinely failed and never resolved, or a gate that was
+    # rejected) is seeded as needs_review regardless of what it actually
+    # was - NOT "failed". Caught by review: a pre-seeded "failed" row's fate
+    # under dispatch's retry_or_raise depends on step_run.max_attempts,
+    # computed from the CURRENT workflow's retries: option - which
+    # workflow_version does NOT hash (deliberately - see .step's own
+    # comment), so a step innocently gaining retries: between the original
+    # run and replay time could make dispatch silently RE-EXECUTE the block
+    # for real, repeating a side effect. needs_review's raise
+    # (unsafe_to_rerun_error) has no such dependency: it always raises,
+    # unconditionally, regardless of attempt/max_attempts - giving replay a
+    # deterministic "stop here" with no retries:-shaped escape hatch, for a
+    # rejected gate exactly the same as for an ordinary step's unresolved
+    # failure.
     #
     # idempotency_key's format ("#{run.id}:#{position}") duplicates
     # Executor::StepRunner's own private method of the same shape - a
@@ -392,12 +437,23 @@ module Belay
     def seed_recorded_steps!(shadow)
       steps.group_by(&:position).each do |position, attempts|
         original = attempts.max_by(&:attempt)
-        next if original.kind == "llm_call"
+        next if llm_position?(position, original)
 
-        shadow.steps.create!(position: position, name: original.name, kind: original.kind,
-                             status: original.status, output: original.output, error: original.error,
-                             idempotency_key: "#{shadow.id}:#{position}")
+        seed_one_recorded_step!(shadow, position, original)
       end
+    end
+
+    def seed_one_recorded_step!(shadow, position, original)
+      attrs = if %w[succeeded skipped].include?(original.status)
+                { status: original.status, output: original.output }
+              else
+                reason = "belay_steps##{original.id} in the original run was #{original.status} - " \
+                         "replay stops at the same point rather than guessing past it"
+                { status: "needs_review", error: { "reason" => reason } }
+              end
+
+      shadow.steps.create!(attrs.merge(position: position, name: original.name, kind: original.kind,
+                                       idempotency_key: "#{shadow.id}:#{position}"))
     end
 
     # Each bang method declares its own required source status(es), rather than checking

@@ -1,8 +1,9 @@
 <header class="border-b border-slate-200 bg-white">
   <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-3 sm:px-6">
     <%= link_to "Belay", runs_path, class: "text-lg font-semibold text-slate-900" %>
-    <nav class="text-sm text-slate-500">
+    <nav class="flex gap-4 text-sm text-slate-500">
       <%= link_to "Runs", runs_path, class: "hover:text-slate-900" %>
+      <%= link_to "Stats", stats_path, class: "hover:text-slate-900" %>
     </nav>
   </div>
 </header>

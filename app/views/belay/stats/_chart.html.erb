@@ -1,0 +1,19 @@
+<%
+  # Bar height is a computed percentage, not a Tailwind utility class - an
+  # interpolated class string like "h-[#{pct}%]" wouldn't be seen by
+  # Tailwind's build-time content scanner (it reads the template's literal
+  # source text, not its rendered output), so it would compile away to
+  # nothing. A plain inline style is the correct tool here, not a workaround.
+  max_rate = daily_stats.map(&:calls_per_100_runs).max
+  max_rate = 1.0 if max_rate.to_f.zero? # avoid dividing by zero when every day's rate is 0
+%>
+<div class="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+  <div class="flex h-48 items-end gap-2">
+    <% daily_stats.each do |day| %>
+      <div class="flex flex-1 flex-col items-center gap-1" title="<%= day.date %>: <%= day.calls_per_100_runs %> per 100 runs">
+        <div class="w-full rounded-t bg-sky-500" style="height: <%= (day.calls_per_100_runs / max_rate * 100).round(1) %>%"></div>
+        <span class="text-xs text-slate-400"><%= day.date.strftime("%-m/%-d") %></span>
+      </div>
+    <% end %>
+  </div>
+</div>

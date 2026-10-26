@@ -7,5 +7,7 @@ Belay::Engine.routes.draw do
       get :diff
     end
   end
+  get "stats", to: "stats#index"
+
   root to: "runs#index"
 end

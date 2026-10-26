@@ -1,0 +1,22 @@
+<div class="mt-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+  <table class="min-w-full divide-y divide-slate-200 text-sm">
+    <thead class="bg-slate-50">
+      <tr>
+        <th class="px-4 py-2 text-left font-medium text-slate-500">Date</th>
+        <th class="px-4 py-2 text-left font-medium text-slate-500">Runs</th>
+        <th class="px-4 py-2 text-left font-medium text-slate-500">Real API calls</th>
+        <th class="px-4 py-2 text-left font-medium text-slate-500">Per 100 runs</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-100">
+      <% daily_stats.each do |day| %>
+        <tr class="hover:bg-slate-50">
+          <td class="stat-date px-4 py-2 text-slate-900"><%= day.date %></td>
+          <td class="stat-runs px-4 py-2 text-slate-500"><%= day.runs %></td>
+          <td class="stat-calls px-4 py-2 text-slate-500"><%= day.real_calls %></td>
+          <td class="stat-rate px-4 py-2 font-medium text-slate-900"><%= day.calls_per_100_runs %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

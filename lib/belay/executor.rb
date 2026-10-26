@@ -277,8 +277,15 @@ module Belay
         condition = step_run.step_definition.options[:when]
         return nil unless condition.call(context)
 
+        # Computed from the live Context's own symbol-keyed Hashes, before anything
+        # round-trips through jsonb - see Rule.context_key_for and belay_rules' own
+        # migration comment for why that ordering matters. Stashed on this gate's
+        # own step.input so Run#approve!/reject! (feat(rules): learn a rule...) can
+        # read it back later without re-deriving outputs-so-far themselves.
+        context_key = Rule.context_key_for(input: context.input, outputs: context.outputs)
+
         ActiveRecord::Base.transaction do
-          step.update!(status: "awaiting_approval")
+          step.update!(status: "awaiting_approval", input: { "context_key" => context_key })
           @run.pause!
           @run.release_lease!
         end

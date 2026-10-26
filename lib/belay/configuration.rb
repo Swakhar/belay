@@ -29,12 +29,22 @@ module Belay
     # distinction most workflows don't need to make per-step.
     attr_accessor :cache_ttl
 
+    # How many consistent, unedited approve!s of the exact same gate occurrence
+    # (same workflow_version, gate_name, and input/outputs - see Belay::Rule)
+    # it takes before that occurrence is learned as a rule. One global setting,
+    # same reasoning as cache_ttl above - a per-gate override is more API
+    # surface than any workflow has asked for yet. Does not by itself make
+    # anything auto-approve; see feat(rules): auto-settle a gate when a
+    # learned rule matches, before ever pausing.
+    attr_accessor :rule_approval_threshold
+
     def initialize
       @lease_duration = 300
       @heartbeat_interval = 30
       @provider = nil
       @authenticate_with = nil
       @cache_ttl = 7 * 24 * 60 * 60 # 7 days
+      @rule_approval_threshold = 3
     end
   end
 end

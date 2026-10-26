@@ -400,6 +400,35 @@ RSpec.describe Belay::Run do
       expect { run.approve!(by: "reviewer@example.com") }
         .to raise_error(Belay::Error, /already decided/)
     end
+
+    it "records a consistent approval toward learning a rule, keyed on the gate's own context_key" do
+      run = build_paused_run
+      gate = run.pending_gate
+
+      run.approve!(by: "reviewer@example.com")
+
+      rule = Belay::Rule.sole
+      expect(rule).to have_attributes(workflow: "RunSpecGateWorkflow", workflow_version: run.workflow_version,
+                                      gate_name: "approval", context_key: gate.input["context_key"],
+                                      consistent_approvals: 1)
+    end
+
+    it "does NOT record a rule approval when edited_payload was given - an edit means the gate's own " \
+       "answer wasn't quite right" do
+      run = build_paused_run
+
+      run.approve!(by: "reviewer@example.com", edited_payload: { total_cents: 999 })
+
+      expect(Belay::Rule.count).to eq(0)
+    end
+
+    it "does not raise, and records nothing, for a gate with no context_key (e.g. from before this feature)" do
+      run = build_paused_run
+      run.pending_gate.update!(input: nil)
+
+      expect { run.approve!(by: "reviewer@example.com") }.not_to raise_error
+      expect(Belay::Rule.count).to eq(0)
+    end
   end
 
   describe "#reject!" do
@@ -421,6 +450,17 @@ RSpec.describe Belay::Run do
       expect(approval.status).to eq("rejected")
       expect(approval.decided_by).to eq("reviewer@example.com")
       expect(run.reload.status).to eq("failed")
+    end
+
+    it "permanently invalidates the rule for this exact gate occurrence, keyed on the gate's own context_key" do
+      run = build_paused_run
+      gate = run.pending_gate
+
+      run.reject!(by: "reviewer@example.com")
+
+      rule = Belay::Rule.sole
+      expect(rule).to have_attributes(gate_name: "approval", context_key: gate.input["context_key"],
+                                      status: "invalidated")
     end
   end
 

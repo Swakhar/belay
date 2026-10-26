@@ -575,6 +575,17 @@ RSpec.describe Belay::Executor do
       expect(run.steps.where(position: 2)).to be_empty # :book never ran
     end
 
+    it "stashes a context_key on the gate step, derived from the exact input/outputs when: saw" do
+      stub_const("ExecutorSpecGateContextKeyWorkflow", gate_workflow(->(_ctx) { true }))
+      run = build_run(workflow_class: ExecutorSpecGateContextKeyWorkflow)
+
+      described_class.new(run).call
+
+      gate_step = run.steps.find_by(position: 1)
+      expected_key = Belay::Rule.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } })
+      expect(gate_step.input).to eq("context_key" => expected_key)
+    end
+
     it "rolls back the awaiting_approval write if pausing the run fails partway through" do
       # Proves the transaction wrapping step.update! + pause! + release_lease! is
       # real, not just asserted in a comment: without it, the step would already

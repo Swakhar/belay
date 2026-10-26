@@ -192,16 +192,24 @@ module Belay
     def approve!(by:, edited_payload: nil)
       gate = require_pending_gate!("approve")
 
-      ActiveRecord::Base.transaction do
-        approvals.create!(step: gate, status: "approved", decided_by: by, decided_at: Time.current,
-                          edited_payload: edited_payload)
-        gate.update!(status: "succeeded", output: edited_payload)
-        resume!
+      begin
+        settle_gate_approved!(gate, by: by, edited_payload: edited_payload)
+      rescue ActiveRecord::RecordNotUnique
+        raise Error, "belay_runs##{id}'s gate :#{gate.name} was already decided by another approve!/reject! call"
       end
 
+      # Enqueued before rule bookkeeping below, deliberately: the gate is already
+      # settled and the run already resumed at this point, so nothing past here
+      # should be able to leave the run stuck without a job to actually continue
+      # it - not even an unexpected error from rule-learning, which this method's
+      # own rescue above must never be allowed to catch (that rescue is scoped to
+      # settle_gate_approved! alone for exactly this reason).
       ResumeRunJob.perform_later(id)
-    rescue ActiveRecord::RecordNotUnique
-      raise Error, "belay_runs##{id}'s gate :#{gate.name} was already decided by another approve!/reject! call"
+      # Only an UNEDITED approval counts toward learning a rule (DESIGN_DECISIONS) -
+      # a human who edited the payload before approving is saying the gate's own
+      # answer wasn't quite right, which is the opposite of "safe to auto-settle
+      # identically next time."
+      record_rule_decision!(gate, approved: true) if edited_payload.nil?
     end
 
     # Rejects this run's pending gate: records a rejected Belay::Approval, settles
@@ -217,14 +225,13 @@ module Belay
     def reject!(by:)
       gate = require_pending_gate!("reject")
 
-      reason = "gate :#{gate.name} rejected by #{by}"
-      ActiveRecord::Base.transaction do
-        approvals.create!(step: gate, status: "rejected", decided_by: by, decided_at: Time.current)
-        gate.update!(status: "failed", error: { "reason" => reason })
-        fail!(error: { "reason" => reason })
+      begin
+        settle_gate_rejected!(gate, by: by)
+      rescue ActiveRecord::RecordNotUnique
+        raise Error, "belay_runs##{id}'s gate :#{gate.name} was already decided by another approve!/reject! call"
       end
-    rescue ActiveRecord::RecordNotUnique
-      raise Error, "belay_runs##{id}'s gate :#{gate.name} was already decided by another approve!/reject! call"
+
+      record_rule_decision!(gate, approved: false)
     end
 
     # The two outcomes a human can give a needs_review step (flag_needs_review!,
@@ -343,6 +350,42 @@ module Belay
       raise Error, "belay_runs##{id} has no pending gate to #{action}" if gate.nil?
 
       gate
+    end
+
+    # A no-op for a gate decided before this feature existed (or any other reason
+    # gate.input never got a context_key stashed on it by Executor#evaluate_gate!)
+    # - there's nothing to learn or invalidate without the exact snapshot the gate
+    # was evaluated under, and that's not an error worth raising approve!/reject!
+    # over.
+    def settle_gate_rejected!(gate, by:)
+      reason = "gate :#{gate.name} rejected by #{by}"
+      ActiveRecord::Base.transaction do
+        approvals.create!(step: gate, status: "rejected", decided_by: by, decided_at: Time.current)
+        gate.update!(status: "failed", error: { "reason" => reason })
+        fail!(error: { "reason" => reason })
+      end
+    end
+
+    def settle_gate_approved!(gate, by:, edited_payload:)
+      ActiveRecord::Base.transaction do
+        approvals.create!(step: gate, status: "approved", decided_by: by, decided_at: Time.current,
+                          edited_payload: edited_payload)
+        gate.update!(status: "succeeded", output: edited_payload)
+        resume!
+      end
+    end
+
+    def record_rule_decision!(gate, approved:)
+      context_key = gate.input.is_a?(Hash) ? gate.input["context_key"] : nil
+      return if context_key.nil?
+
+      if approved
+        Rule.record_approval!(workflow: workflow, workflow_version: workflow_version, gate_name: gate.name,
+                              context_key: context_key)
+      else
+        Rule.record_rejection!(workflow: workflow, workflow_version: workflow_version, gate_name: gate.name,
+                               context_key: context_key)
+      end
     end
 
     # replayed: false (and changed: false, not true) when the shadow never

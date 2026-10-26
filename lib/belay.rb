@@ -12,6 +12,7 @@ module Belay
   require_relative "belay/step"
   require_relative "belay/approval"
   require_relative "belay/cache_entry"
+  require_relative "belay/rule"
   require_relative "belay/workflow"
   require_relative "belay/context"
   require_relative "belay/provider_response"

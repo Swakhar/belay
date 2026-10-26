@@ -84,6 +84,16 @@ module Belay
       # author never declared kind: explicitly (an explicit kind: is never overridden).
       DEFAULT_KIND = "decision"
 
+      # Returned by evaluate_gate! only for the rule-auto-settled case (see
+      # auto_settle_gate! below) - a sentinel distinguishing "this gate step's row
+      # is already fully, correctly written" from a real output value, since a
+      # gate's own legitimate output (nil, same as approve! with no
+      # edited_payload) is otherwise indistinguishable from "nothing happened
+      # yet." run_attempt checks for this by identity, not by nil, specifically
+      # so it never re-checkpoints over what auto_settle_gate! just wrote.
+      AUTO_SETTLED = Object.new.freeze
+      private_constant :AUTO_SETTLED
+
       # What one step's execution needs, bundled so passing it around doesn't mean a
       # five-plus-argument parameter list on every private method below.
       StepRun = Struct.new(:step_definition, :position, :outputs, :max_attempts, keyword_init: true)
@@ -228,6 +238,8 @@ module Belay
       def run_attempt(step_run, step)
         context = build_context(step_run)
         output = run_block(step_run, context, step)
+        return [nil, nil] if output.equal?(AUTO_SETTLED) # auto_settle_gate! already wrote this row itself
+
         step.update!(status: settled_status(step_run), output: output, **extra_step_attrs(step_run, context))
         [output, nil]
       rescue StandardError => e
@@ -247,15 +259,62 @@ module Belay
       end
 
       # when: false settles normally (returns nil, caller checkpoints "skipped").
-      # when: true pauses right here instead: this step's own row becomes
-      # "awaiting_approval" (not "succeeded", not "failed" - run_attempt's own
-      # checkpoint line below never runs, since throw skips straight past it, same
-      # as it skips the rescue), the run is paused and its lease released, then
-      # throw :gate_paused unwinds all the way up to Executor#call's catch,
-      # skipping every remaining step and the complete! call - cleanly, not via an
-      # exception any rescue StandardError could intercept or retry: could retry.
-      # That's the actual fix for the previous commit's documented retries: gap:
-      # there's no raise on this path anymore for retries: to apply to at all.
+      # when: true either auto-settles (auto_settle_gate!) or pauses
+      # (pause_on_gate!) - see each for its own reasoning.
+      def evaluate_gate!(step_run, context, step)
+        condition = step_run.step_definition.options[:when]
+        return nil unless condition.call(context)
+
+        # Computed from the live Context's own symbol-keyed Hashes, before anything
+        # round-trips through jsonb - see Rule.context_key_for and belay_rules' own
+        # migration comment for why that ordering matters. Stashed on whichever of
+        # the two paths below actually settles this gate, so Run#approve!/reject!
+        # and the dashboard can both read it back later without re-deriving
+        # outputs-so-far themselves.
+        context_key = Rule.context_key_for(input: context.input, outputs: context.outputs, condition: condition)
+        rule = matching_active_rule(step_run, context_key)
+        return auto_settle_gate!(step, context_key, rule) if rule
+
+        pause_on_gate!(step, context_key)
+      end
+
+      def matching_active_rule(step_run, context_key)
+        Rule.active_for(workflow: @run.workflow, workflow_version: @run.workflow_version,
+                        gate_name: step_run.step_definition.name, context_key: context_key)
+      end
+
+      # Auto-approves this exact gate occurrence without ever pausing for a human,
+      # because Belay::Rule already learned it (status: "active") from N
+      # consistent, unedited human approvals of this identical (workflow,
+      # workflow_version, gate_name, context_key) - see feat(rules): learn a
+      # rule.... output: nil, same shape approve! leaves when no edited_payload
+      # was given: an auto-settled gate is indistinguishable from an unedited
+      # human approval except for rule_applied_id being set, and there's no
+      # Belay::Approval row, since no human actually decided this one.
+      #
+      # A single atomic UPDATE is enough here, unlike pause_on_gate! below's
+      # multi-write transaction: this path never touches the run's own status or
+      # its lease, so there's no multi-table invariant a mid-write crash could
+      # leave half-done - the existing orphaned-"started"-gate recovery
+      # (resume_orphaned_started's idempotent?/needs_review branch) already
+      # covers a crash before this single write commits, same as it does for the
+      # when: false "skipped" path.
+      def auto_settle_gate!(step, context_key, rule)
+        step.update!(status: "succeeded", output: nil, input: { "context_key" => context_key },
+                     rule_applied_id: rule.id)
+        AUTO_SETTLED
+      end
+
+      # when: true, no matching active rule: pauses right here instead of
+      # returning. This step's own row becomes "awaiting_approval" (not
+      # "succeeded", not "failed" - run_attempt's own checkpoint line never
+      # runs, since throw skips straight past it, same as it skips the rescue),
+      # the run is paused and its lease released, then throw :gate_paused unwinds
+      # all the way up to Executor#call's catch, skipping every remaining step
+      # and the complete! call - cleanly, not via an exception any rescue
+      # StandardError could intercept or retry. That's the actual fix for an
+      # earlier commit's documented retries: gap: there's no raise on this path
+      # for retries: to apply to at all.
       #
       # The three writes below are wrapped in one transaction, and the throw
       # happens AFTER it (not inside it): a process killed mid-transaction rolls
@@ -273,17 +332,7 @@ module Belay
       # not an exception, so it wouldn't trigger Rails' own rollback-on-exception
       # path, but there's no reason to rely on that distinction when the simpler
       # structure (commit first, throw after) removes the question entirely.
-      def evaluate_gate!(step_run, context, step)
-        condition = step_run.step_definition.options[:when]
-        return nil unless condition.call(context)
-
-        # Computed from the live Context's own symbol-keyed Hashes, before anything
-        # round-trips through jsonb - see Rule.context_key_for and belay_rules' own
-        # migration comment for why that ordering matters. Stashed on this gate's
-        # own step.input so Run#approve!/reject! (feat(rules): learn a rule...) can
-        # read it back later without re-deriving outputs-so-far themselves.
-        context_key = Rule.context_key_for(input: context.input, outputs: context.outputs)
-
+      def pause_on_gate!(step, context_key)
         ActiveRecord::Base.transaction do
           step.update!(status: "awaiting_approval", input: { "context_key" => context_key })
           @run.pause!

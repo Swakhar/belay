@@ -6,18 +6,49 @@ RSpec.describe Belay::Rule do
   end
 
   describe ".context_key_for" do
-    it "is the same for identical input/outputs" do
-      a = described_class.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } })
-      b = described_class.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } })
+    def condition
+      @condition ||= ->(_ctx) { true }
+    end
+
+    it "is the same for identical input/outputs/condition" do
+      a = described_class.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } },
+                                          condition: condition)
+      b = described_class.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } },
+                                          condition: condition)
 
       expect(a).to eq(b)
     end
 
     it "differs on input or outputs" do
-      base = described_class.context_key_for(input: { invoice_id: 42 }, outputs: {})
+      base = described_class.context_key_for(input: { invoice_id: 42 }, outputs: {}, condition: condition)
 
-      expect(described_class.context_key_for(input: { invoice_id: 43 }, outputs: {})).not_to eq(base)
-      expect(described_class.context_key_for(input: { invoice_id: 42 }, outputs: { a: 1 })).not_to eq(base)
+      expect(described_class.context_key_for(input: { invoice_id: 43 }, outputs: {}, condition: condition))
+        .not_to eq(base)
+      expect(described_class.context_key_for(input: { invoice_id: 42 }, outputs: { a: 1 }, condition: condition))
+        .not_to eq(base)
+    end
+
+    it "differs when the gate's when: is a different Proc (e.g. the gate was edited), even with " \
+       "identical input/outputs - workflow_version alone doesn't catch an edited condition" do
+      other_condition = ->(_ctx) { false }
+
+      base = described_class.context_key_for(input: { invoice_id: 42 }, outputs: {}, condition: condition)
+      other = described_class.context_key_for(input: { invoice_id: 42 }, outputs: {}, condition: other_condition)
+
+      expect(other).not_to eq(base)
+    end
+
+    it "falls back to the condition's class name for a when: that isn't a Proc/Method (no #source_location " \
+       "of its own)" do
+      callable_class = Class.new do
+        def call(_ctx)
+          true
+        end
+      end
+      callable_without_source_location = callable_class.new
+
+      expect { described_class.context_key_for(input: {}, outputs: {}, condition: callable_without_source_location) }
+        .not_to raise_error
     end
   end
 
@@ -95,6 +126,38 @@ RSpec.describe Belay::Rule do
 
       expect { described_class.record_rejection!(**identity) }.not_to raise_error
       expect(described_class.count).to eq(1)
+    end
+  end
+
+  describe ".active_for" do
+    it "is nil when there's no rule at all for this exact gate occurrence" do
+      expect(described_class.active_for(**identity)).to be_nil
+    end
+
+    it "is nil while still learning, even one approval short of the threshold" do
+      described_class.record_approval!(**identity, threshold: 3)
+      described_class.record_approval!(**identity, threshold: 3)
+
+      expect(described_class.active_for(**identity)).to be_nil
+    end
+
+    it "returns the rule once it's active" do
+      described_class.record_approval!(**identity, threshold: 1)
+
+      expect(described_class.active_for(**identity)).to eq(described_class.sole)
+    end
+
+    it "is nil for an invalidated rule, even one that was active first" do
+      described_class.record_approval!(**identity, threshold: 1)
+      described_class.record_rejection!(**identity)
+
+      expect(described_class.active_for(**identity)).to be_nil
+    end
+
+    it "is scoped to the exact identity - a different context_key never matches" do
+      described_class.record_approval!(**identity(context_key: "k1"), threshold: 1)
+
+      expect(described_class.active_for(**identity(context_key: "k2"))).to be_nil
     end
   end
 end

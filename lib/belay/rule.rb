@@ -18,17 +18,44 @@ module Belay
 
     validates :workflow, :workflow_version, :gate_name, :context_key, :status, presence: true
 
-    # SHA256 of [input, outputs].inspect - the exact input/outputs a gate's when:
-    # was evaluated against. Computed once, at evaluation time (Executor#evaluate_gate!),
+    # SHA256 of [input, outputs, a fingerprint of condition].inspect - the exact
+    # input/outputs a gate's when: was evaluated against, AND which when: actually
+    # evaluated them. Computed once, at evaluation time (Executor#evaluate_gate!),
     # from the live Context's own symbol-keyed Hashes - never re-derived later from
     # a round-tripped jsonb Hash (string-keyed), which would silently stop matching
     # anything. Same exact-match-hash approach as Belay::CacheEntry.key_for, same
-    # reasoning: deliberately not normalized, and deliberately the FULL snapshot
-    # rather than just whatever a gate's own when: closure happens to read - a
-    # narrower key could auto-settle a future occurrence that looks identical to
-    # the closure but differs in some upstream value nobody declared as relevant.
-    def self.context_key_for(input:, outputs:)
-      Digest::SHA256.hexdigest([input, outputs].inspect)
+    # reasoning: deliberately not normalized, and deliberately the FULL input/
+    # outputs snapshot rather than just whatever a gate's own when: closure happens
+    # to read - a narrower key could auto-settle a future occurrence that looks
+    # identical to the closure but differs in some upstream value nobody declared
+    # as relevant.
+    #
+    # condition is included because Workflow.workflow_version is NOT enough to
+    # catch an edited when: on its own: workflow_version deliberately hashes only
+    # [inputs, steps.map { [name, kind] }] - not step/gate options: (see its own
+    # comment) - so rewriting a gate's when: entirely, while keeping its name and
+    # the workflow's other steps unchanged, leaves workflow_version identical.
+    # Without this, a rule learned under the OLD condition could auto-settle a
+    # gate running the NEW one, for any (input, outputs) that happens to recur -
+    # silently approving a decision whose logic no human ever actually reviewed.
+    # condition.source_location (file + line) is used as that fingerprint rather
+    # than condition.inspect - a Proc's default #inspect embeds its object_id
+    # (the lambda's memory address), which changes across every process restart
+    # even with zero code changes, which would make every rule stop matching
+    # after every deploy. source_location only changes when the when: actually
+    # moves or is rewritten - not a perfect signal (editing a single-line lambda's
+    # body in place without changing which line it starts on isn't caught, and
+    # neither is a parameterized factory reused as when: threshold_gate(100) ->
+    # threshold_gate(200), since the lambda literal itself never moves), but it
+    # closes the realistic case (any edit that adds/removes a line anywhere
+    # above it in the file, or rewrites the condition across multiple lines)
+    # without the deploy-time false-invalidation problem.
+    # Falls back to the condition's class name for a when: that isn't a Proc/
+    # Method (Workflow#gate only requires #call, via validate_gate_when!) and so
+    # has no #source_location of its own.
+    def self.context_key_for(input:, outputs:, condition:)
+      fingerprint = condition.respond_to?(:source_location) ? condition.source_location : condition.class.name
+      Digest::SHA256.hexdigest([input, outputs, fingerprint].inspect)
     end
 
     # Records one more consistent, unedited approve! of this exact gate
@@ -71,6 +98,16 @@ module Belay
                                 context_key: context_key)
       rule.update!(status: "invalidated", invalidated_at: Time.current)
       rule
+    end
+
+    # nil when there's no rule for this exact gate occurrence yet, or it's still
+    # learning, or it's been invalidated - Executor#evaluate_gate! treats all
+    # three the same way (pause for a human), so this collapses them into one
+    # "nothing to auto-apply" answer rather than returning a status a caller
+    # would have to branch on.
+    def self.active_for(workflow:, workflow_version:, gate_name:, context_key:)
+      find_by(workflow: workflow, workflow_version: workflow_version, gate_name: gate_name,
+              context_key: context_key, status: "active")
     end
   end
 end

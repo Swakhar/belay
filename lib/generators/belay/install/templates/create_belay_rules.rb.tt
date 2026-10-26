@@ -4,15 +4,18 @@ class CreateBelayRules < ActiveRecord::Migration[<%= ActiveRecord::Migration.cur
       t.string :workflow, null: false
       t.string :workflow_version, null: false
       t.string :gate_name, null: false
-      # SHA256 of [input, outputs].inspect - the SAME input/outputs a gate's
-      # when: was evaluated against, computed once at evaluation time (not
-      # re-derived later from a round-tripped jsonb Hash, which would risk a
-      # symbol/string key mismatch silently breaking the exact match - see
-      # Belay::CacheEntry.key_for for the same reasoning applied there).
-      # Deliberately the FULL snapshot, not just whatever a gate's own when:
-      # closure happens to read - a narrower key could auto-settle a future
-      # gate occurrence that looks identical to the closure but differs in
-      # some upstream value nobody declared as relevant.
+      # SHA256 of [input, outputs, a fingerprint of the when: itself].inspect -
+      # see Belay::Rule.context_key_for for the exact fingerprint and why it's
+      # needed (workflow_version alone doesn't catch an edited when:). The
+      # input/outputs are the SAME ones a gate's when: was evaluated against,
+      # computed once at evaluation time (not re-derived later from a round-
+      # tripped jsonb Hash, which would risk a symbol/string key mismatch
+      # silently breaking the exact match - see Belay::CacheEntry.key_for for
+      # the same reasoning applied there). Deliberately the FULL snapshot, not
+      # just whatever a gate's own when: closure happens to read - a narrower
+      # key could auto-settle a future gate occurrence that looks identical to
+      # the closure but differs in some upstream value nobody declared as
+      # relevant.
       t.string :context_key, null: false
       t.integer :consistent_approvals, null: false, default: 0
       # learning: still accumulating consistent_approvals toward the threshold.

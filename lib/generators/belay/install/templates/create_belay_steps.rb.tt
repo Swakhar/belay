@@ -33,10 +33,11 @@ class CreateBelaySteps < ActiveRecord::Migration[<%= ActiveRecord::Migration.cur
       # output_tokens/cost_cents/latency_ms all stay nil/0 for that same row,
       # since nothing was actually billed.
       t.boolean :cache_hit, null: false, default: false
-      # Only ever set on a GATE step, by Run#approve!-via-a-learned-rule (a later
-      # commit) - identifies which belay_rules row auto-settled this gate without
-      # ever pausing for a human. nil for every step a human actually decided
-      # (manual approve!/reject!) and for every non-gate step. The FK into
+      # Only ever set on a GATE step, by Executor::StepRunner#auto_settle_gate!
+      # (a later commit) - identifies which belay_rules row auto-settled this
+      # gate without ever pausing for a human. nil for every step a human
+      # actually decided (manual approve!/reject!) and for every non-gate step.
+      # The FK into
       # belay_rules lives in create_belay_rules.rb.tt, not here: that table is
       # created by a LATER migration (belay_rules needs this column to already
       # exist on belay_steps before it can reference it), so adding the FK from

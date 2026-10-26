@@ -576,14 +576,73 @@ RSpec.describe Belay::Executor do
     end
 
     it "stashes a context_key on the gate step, derived from the exact input/outputs when: saw" do
-      stub_const("ExecutorSpecGateContextKeyWorkflow", gate_workflow(->(_ctx) { true }))
+      condition = ->(_ctx) { true }
+      stub_const("ExecutorSpecGateContextKeyWorkflow", gate_workflow(condition))
       run = build_run(workflow_class: ExecutorSpecGateContextKeyWorkflow)
 
       described_class.new(run).call
 
       gate_step = run.steps.find_by(position: 1)
-      expected_key = Belay::Rule.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } })
+      expected_key = Belay::Rule.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } },
+                                                 condition: condition)
       expect(gate_step.input).to eq("context_key" => expected_key)
+    end
+
+    it "auto-settles the gate succeeded, with no pause and no Approval, when an active rule matches " \
+       "this exact occurrence" do
+      condition = ->(_ctx) { true }
+      stub_const("ExecutorSpecGateRuleWorkflow", gate_workflow(condition))
+      run = build_run(workflow_class: ExecutorSpecGateRuleWorkflow)
+      context_key = Belay::Rule.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } },
+                                                condition: condition)
+      rule = Belay::Rule.record_approval!(workflow: ExecutorSpecGateRuleWorkflow.name,
+                                          workflow_version: ExecutorSpecGateRuleWorkflow.workflow_version,
+                                          gate_name: "approval", context_key: context_key, threshold: 1)
+
+      result = described_class.new(run).call
+
+      expect(result).to eq(run) # returns cleanly, same as a normal completion - no throw escapes this time
+      gate_step = run.steps.find_by(position: 1)
+      expect(gate_step).to have_attributes(status: "succeeded", output: nil, rule_applied_id: rule.id)
+      expect(gate_step.input).to eq("context_key" => context_key)
+      expect(gate_step.approval).to be_nil # no human ever decided this one
+      expect(run.reload.status).to eq("completed") # never paused - :book ran right past it
+      expect(run.steps.find_by(position: 2).output).to eq("booked")
+    end
+
+    it "does NOT auto-settle a gate whose when: was edited, even though a rule is active for the " \
+       "identical input/outputs under the OLD condition - workflow_version alone wouldn't catch this" do
+      old_condition = ->(_ctx) { true }
+      new_condition = ->(_ctx) { true } # same logic, but a genuinely different Proc/source_location
+      context_key = Belay::Rule.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } },
+                                                condition: old_condition)
+      stub_const("ExecutorSpecGateEditedConditionWorkflow", gate_workflow(new_condition))
+      Belay::Rule.record_approval!(workflow: ExecutorSpecGateEditedConditionWorkflow.name,
+                                   workflow_version: ExecutorSpecGateEditedConditionWorkflow.workflow_version,
+                                   gate_name: "approval", context_key: context_key, threshold: 1)
+      run = build_run(workflow_class: ExecutorSpecGateEditedConditionWorkflow)
+
+      described_class.new(run).call
+
+      expect(run.steps.find_by(position: 1).status).to eq("awaiting_approval") # paused, not auto-settled
+      expect(run.reload.status).to eq("paused")
+    end
+
+    it "still pauses for a human when a rule exists for this occurrence but hasn't reached the " \
+       "threshold yet" do
+      condition = ->(_ctx) { true }
+      stub_const("ExecutorSpecGateLearningRuleWorkflow", gate_workflow(condition))
+      run = build_run(workflow_class: ExecutorSpecGateLearningRuleWorkflow)
+      context_key = Belay::Rule.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } },
+                                                condition: condition)
+      Belay::Rule.record_approval!(workflow: ExecutorSpecGateLearningRuleWorkflow.name,
+                                   workflow_version: ExecutorSpecGateLearningRuleWorkflow.workflow_version,
+                                   gate_name: "approval", context_key: context_key, threshold: 3)
+
+      described_class.new(run).call
+
+      expect(run.steps.find_by(position: 1).status).to eq("awaiting_approval")
+      expect(run.reload.status).to eq("paused")
     end
 
     it "rolls back the awaiting_approval write if pausing the run fails partway through" do

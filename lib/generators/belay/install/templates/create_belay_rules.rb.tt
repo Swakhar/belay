@@ -1,0 +1,43 @@
+class CreateBelayRules < ActiveRecord::Migration[<%= ActiveRecord::Migration.current_version %>]
+  def change
+    create_table :belay_rules, id: :uuid do |t|
+      t.string :workflow, null: false
+      t.string :workflow_version, null: false
+      t.string :gate_name, null: false
+      # SHA256 of [input, outputs].inspect - the SAME input/outputs a gate's
+      # when: was evaluated against, computed once at evaluation time (not
+      # re-derived later from a round-tripped jsonb Hash, which would risk a
+      # symbol/string key mismatch silently breaking the exact match - see
+      # Belay::CacheEntry.key_for for the same reasoning applied there).
+      # Deliberately the FULL snapshot, not just whatever a gate's own when:
+      # closure happens to read - a narrower key could auto-settle a future
+      # gate occurrence that looks identical to the closure but differs in
+      # some upstream value nobody declared as relevant.
+      t.string :context_key, null: false
+      t.integer :consistent_approvals, null: false, default: 0
+      # learning: still accumulating consistent_approvals toward the threshold.
+      # active: at or past the threshold - safe for a later commit to auto-
+      # settle this exact gate occurrence without ever pausing for a human.
+      # invalidated: a human rejected this exact gate occurrence at least
+      # once - terminal, permanent, never re-learned. A single rejection
+      # invalidates immediately, with no tolerance for "mostly consistent":
+      # see feat(rules) commits for the learning/auto-settle logic that
+      # enforces this.
+      t.string :status, null: false, default: "learning"
+      t.datetime :invalidated_at
+
+      t.timestamps
+    end
+
+    # Added here, not in create_belay_steps.rb.tt: belay_rules doesn't exist yet
+    # when that earlier migration runs, so the FK has to be added once this
+    # table does.
+    add_foreign_key :belay_steps, :belay_rules, column: :rule_applied_id
+
+    # One row per exact (workflow, workflow_version, gate_name, context_key)
+    # combination - a second consistent approval for the same gate occurrence
+    # updates this same row's counter rather than creating a sibling.
+    add_index :belay_rules, [:workflow, :workflow_version, :gate_name, :context_key],
+              unique: true, name: "index_belay_rules_on_identity"
+  end
+end

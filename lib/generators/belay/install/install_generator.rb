@@ -28,10 +28,20 @@ module Belay
 
       # No FK into belay_runs/belay_steps - a cache entry isn't tied to any
       # particular run, so there's no ordering dependency forcing this after
-      # the others. Still last, for the same reason every new migration this
-      # gem has ever added has been: one predictable place to look.
+      # the others.
       def create_belay_cache_entries_migration
         migration_template "create_belay_cache_entries.rb.tt", "db/migrate/create_belay_cache_entries.rb"
+      end
+
+      # Last: belay_rules' own migration is what adds the FK from belay_steps.
+      # rule_applied_id into belay_rules (see create_belay_rules.rb.tt's own
+      # comment on why that FK can't live in create_belay_steps.rb.tt instead),
+      # so this table has to exist before that FK statement runs. Not ordered
+      # relative to belay_cache_entries for any dependency reason - just the
+      # one predictable place to look for whichever migration was added most
+      # recently.
+      def create_belay_rules_migration
+        migration_template "create_belay_rules.rb.tt", "db/migrate/create_belay_rules.rb"
       end
     end
   end

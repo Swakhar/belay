@@ -151,6 +151,55 @@ RSpec.describe Belay::Generators::InstallGenerator do
     expect(content).to include("t.boolean :cache_hit, null: false, default: false")
   end
 
+  it "adds a nullable rule_applied_id to belay_steps, with no FK in that same migration" do
+    run_generator
+
+    content = File.read(migration_file("db/migrate/create_belay_steps.rb"))
+
+    expect(content).to include("t.uuid :rule_applied_id")
+    expect(content).not_to include("add_foreign_key :belay_steps, :belay_rules")
+  end
+
+  it "defines belay_rules with the identity columns, a learning counter and status, and the FK back " \
+     "into belay_steps" do
+    run_generator
+
+    content = File.read(migration_file("db/migrate/create_belay_rules.rb"))
+
+    expect(content).to include("create_table :belay_rules, id: :uuid")
+    %w[workflow workflow_version gate_name context_key consistent_approvals status
+       invalidated_at].each do |column|
+      expect(content).to include(":#{column}")
+    end
+
+    expect(content).to include("t.string :context_key, null: false")
+    expect(content).to include("t.integer :consistent_approvals, null: false, default: 0")
+    expect(content).to include('t.string :status, null: false, default: "learning"')
+
+    expect(content).to include("add_foreign_key :belay_steps, :belay_rules, column: :rule_applied_id")
+    expect(content).to include("[:workflow, :workflow_version, :gate_name, :context_key],")
+    expect(content).to include("unique: true, name: \"index_belay_rules_on_identity\"")
+  end
+
+  it "creates a timestamped belay_rules migration that is syntactically valid Ruby" do
+    run_generator
+
+    migration = migration_file("db/migrate/create_belay_rules.rb")
+    expect(migration).to match(%r{db/migrate/\d{14}_create_belay_rules\.rb\z})
+    expect { RubyVM::InstructionSequence.compile_file(migration) }.not_to raise_error
+  end
+
+  it "orders belay_rules after belay_steps and belay_cache_entries" do
+    run_generator
+
+    steps_migration = File.basename(migration_file("db/migrate/create_belay_steps.rb"))
+    cache_entries_migration = File.basename(migration_file("db/migrate/create_belay_cache_entries.rb"))
+    rules_migration = File.basename(migration_file("db/migrate/create_belay_rules.rb"))
+
+    expect(steps_migration).to be < rules_migration
+    expect(cache_entries_migration).to be < rules_migration
+  end
+
   def migration_file(relative_path)
     base = File.basename(relative_path, ".rb")
     Dir.glob(File.join(destination_root, File.dirname(relative_path), "*_#{base}.rb")).first

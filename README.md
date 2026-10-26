@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release. Phase 1 (core runtime) complete as of `v0.1.0.pre1`; Phase 2 (gates & dashboard), Phase 2.5 (dashboard UI) and Phase 3 (replay) complete as of this commit. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13). `gate(name, when:)` is checkpointed correctly either way: `when:` false skips it and the run continues past it; `when:` true pauses the run (releasing its lease) and leaves it `awaiting_approval`, resolved by `run.approve!(by:, edited_payload: nil)`/`run.reject!(by:)`. A `needs_review` step (orphaned by a crash, not declared `idempotent: true`) is resolved the same way by `run.resolve_needs_review!(by:, outcome:, output: nil)`. `run.replay(model:)` re-runs a completed run's `llm_call` steps against a different model, serving everything else (plain Ruby steps, tool calls, gate decisions) from what actually happened the first time - `run.replay_diff` compares the two, step by step. `Belay::Engine` is mountable (`mount Belay::Engine => "/belay"`), gated behind a configurable `authenticate_with` hook with no default that lets anyone through, and its dashboard (a real runs index with status/workflow filters, a run detail page with the full step timeline - every retry attempt, each `llm_call` step's prompt/response/model/tokens/cost - forms for all three resolve actions above, and a side-by-side replay diff view) is implemented and proven with real HTTP requests through Rails' own router and middleware, not just designed. See Mounting the dashboard, below. A run executes synchronously in the calling process until it either finishes or hits a gate/needs_review pause; `ResumeRunJob` is only on the hot path once one of those resumes it.
+**Status:** pre-release. Phase 1 (core runtime) complete as of `v0.1.0.pre1`; Phase 2 (gates & dashboard), Phase 2.5 (dashboard UI), Phase 3 (replay) and Phase 4 (cost reduction) complete as of this commit. `Belay::Workflow` (`input`/`step`/`.start`), checkpointing, resume, retries, the idempotent:/needs_review policy, lease-based concurrency (`ResumeRunJob`/`JanitorJob`), `Belay::AnthropicProvider`, and `ctx.llm` are implemented and proven with real process kills and real concurrent workers, not just designed (see DESIGN_DECISIONS.md #13). `gate(name, when:)` is checkpointed correctly either way: `when:` false skips it and the run continues past it; `when:` true either auto-settles it (a learned rule matched - see Rules, below) or pauses the run (releasing its lease) and leaves it `awaiting_approval`, resolved by `run.approve!(by:, edited_payload: nil)`/`run.reject!(by:)`. A `needs_review` step (orphaned by a crash, not declared `idempotent: true`) is resolved the same way by `run.resolve_needs_review!(by:, outcome:, output: nil)`. `run.replay(model:)` re-runs a completed run's `llm_call` steps against a different model, serving everything else (plain Ruby steps, tool calls, gate decisions) from what actually happened the first time - `run.replay_diff` compares the two, step by step. `ctx.llm(..., cacheable: true)` serves an exact-match repeat call from `belay_cache_entries` instead of the provider, and a gate that's been approved consistently and without edits enough times learns a rule that lets a future identical occurrence auto-settle without ever pausing - see Cost reduction, below. `Belay::Engine` is mountable (`mount Belay::Engine => "/belay"`), gated behind a configurable `authenticate_with` hook with no default that lets anyone through, and its dashboard (a real runs index with status/workflow filters, a run detail page with the full step timeline - every retry attempt, each `llm_call` step's prompt/response/model/tokens/cost - forms for all three resolve actions above, a side-by-side replay diff view, and a Stats page charting real provider calls per 100 runs over time) is implemented and proven with real HTTP requests through Rails' own router and middleware, not just designed. See Mounting the dashboard, below. A run executes synchronously in the calling process until it either finishes or hits a gate/needs_review pause; `ResumeRunJob` is only on the hot path once one of those resumes it.
 
 ## Installation
 
@@ -33,13 +33,15 @@ This creates the `belay_runs` and `belay_steps` migrations, and is implemented, 
 ```ruby
 # config/initializers/belay.rb
 Belay.configure do |config|
-  config.lease_duration = 300     # seconds a worker holds a run before the janitor reclaims it
-  config.heartbeat_interval = 30  # seconds between heartbeats while a step is in flight
+  config.lease_duration = 300          # seconds a worker holds a run before the janitor reclaims it
+  config.heartbeat_interval = 30       # seconds between heartbeats while a step is in flight
   config.provider = Belay::AnthropicProvider.new # the provider ctx.llm calls
+  config.cache_ttl = 7 * 24 * 60 * 60  # seconds a ctx.llm(..., cacheable: true) entry stays valid; nil never expires
+  config.rule_approval_threshold = 3   # consistent, unedited approve!s before a gate occurrence becomes a rule
 end
 ```
 
-`lease_duration`/`heartbeat_interval` default to the values above; the initializer is only needed to change them. `lease_duration` is read by `Run#acquire_lease!`/`#heartbeat_lease!` and `JanitorJob`; `heartbeat_interval` is how often a caller is expected to heartbeat (nothing currently heartbeats automatically mid-step - see `lib/belay/resume_run_job.rb`'s and `lib/belay/janitor_job.rb`'s comments for the gap this leaves for a step slower than `lease_duration`). `provider` defaults to `nil` - a workflow with no `ctx.llm`-calling steps never needs it, but calling `ctx.llm` without configuring one raises a clear error.
+`lease_duration`/`heartbeat_interval` default to the values above; the initializer is only needed to change them. `lease_duration` is read by `Run#acquire_lease!`/`#heartbeat_lease!` and `JanitorJob`; `heartbeat_interval` is how often a caller is expected to heartbeat (nothing currently heartbeats automatically mid-step - see `lib/belay/resume_run_job.rb`'s and `lib/belay/janitor_job.rb`'s comments for the gap this leaves for a step slower than `lease_duration`). `provider` defaults to `nil` - a workflow with no `ctx.llm`-calling steps never needs it, but calling `ctx.llm` without configuring one raises a clear error. `cache_ttl` backs `ctx.llm`'s `cacheable:` (see ctx.llm's Caching section, below); `rule_approval_threshold` backs gate Rules (see Rules, below).
 
 ## Mounting the dashboard
 
@@ -62,6 +64,8 @@ When a run is paused on a gate, its show page displays a form to `POST approve_r
 A `needs_review` step (orphaned by a crash, not declared `idempotent: true`) gets the same treatment: the show page's `POST resolve_run_path` takes `by:`, an `outcome:` of `"succeeded"` or `"failed"` (`Run#resolve_needs_review!`'s own `RESOLUTIONS`), and - only for `"succeeded"` - an optional JSON `output:`, since the step's own block never actually returned one to recover. `"succeeded"` resumes the run past it the same way `approve!` does; `"failed"` fails the run directly, the same way `reject!` does, rather than resuming into the executor's retry logic with this step's attempt count already at whatever it was when it crashed. No `Belay::Approval` row here - that model is scoped to gates specifically (including its unique-per-gate-step index); `belay_steps` gained its own `resolved_by`/`resolved_at` columns instead.
 
 A run that's a replay shadow (`run.replay_of` present) links back to the run it was replayed from, and any run with replays of its own lists them, each linking to `Belay::RunsController#diff` (`GET diff_run_path`): a side-by-side table of `run.replay_diff`, one row per step, flagged changed/unchanged/not-reached (not-reached when the shadow's own replay never actually got that far - see `Run#replay_diff`'s own comment for why that's a known, accepted limitation rather than a bug). A replay shadow's needs_review resolve section (below) is deliberately never shown - it isn't a real decision point, just a mirror of where the original run stopped.
+
+A Stats page (`Belay::StatsController#index`, linked from the navbar) charts how many real provider calls (an `llm_call` step with `cache_hit: false` - a cache hit or a rule-auto-settled gate makes no call at all) happened per 100 runs, by day, so caching and rules' actual effect on cost is something an operator can look at rather than code with no visible effect.
 
 The dashboard is styled with Tailwind, compiled and vendored - `app/assets/belay/application.css` is a committed build, inlined into the layout via `Belay::Engine.stylesheet`, not served through whichever asset pipeline (Sprockets, Propshaft, none at all) the host app happens to have, the same way this gem has never assumed Zeitwerk or any other host-app convention elsewhere. There's no runtime build step and no npm dependency for anyone who installs this gem. Contributing to the gem itself and changing a view's classes? `npm install && npm run build:css` regenerates it from `tailwind/application.css` - see `package.json`.
 
@@ -120,6 +124,18 @@ Resolving a `needs_review` step is `run.resolve_needs_review!(by:, outcome:, out
 
 See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for the delivery guarantee (at-least-once, exactly-once only for idempotent steps - decision #2, proven against the real gem with real process kills and real concurrent workers by decision #13) and the reasoning behind the rest of the design.
 
+## Rules
+
+```ruby
+Belay.configure { |config| config.rule_approval_threshold = 3 } # default
+```
+
+A gate approved consistently, and without edits, enough times learns a **rule** - a future occurrence with the exact same `(input, outputs)` and the exact same `when:` condition then auto-settles without ever pausing for a human. Nothing needs to be configured to opt in; it happens automatically from ordinary `approve!` calls, governed by `Belay.config.rule_approval_threshold` (default 3).
+
+Only an UNEDITED `approve!` (no `edited_payload:`) counts toward learning - editing the output is a human saying the gate's own answer wasn't quite right. A single `reject!` invalidates the matching rule immediately and permanently: no tolerance for "mostly consistent," and no re-learning afterward for that exact occurrence, no matter how many approvals arrive later.
+
+An auto-settled gate's step row looks like an unedited human approval (`status: "succeeded"`, `output: nil`), except `rule_applied_id` is set and there's no `Belay::Approval` row - no human decided that one. This is the one place in this gem that bypasses a human decision point entirely, so matching is scoped as tightly as possible: a rule learned under one `when:` condition cannot match a gate now running a different one, even with identical input/outputs, even if the gate kept the same name - see DESIGN_DECISIONS.md #18 for why that distinction needs its own mechanism, separate from `workflow_version`.
+
 ## Replay
 
 ```ruby
@@ -137,7 +153,7 @@ A model: override reaching the actual provider call, not just a workflow author'
 
 ## ctx.llm
 
-`ctx.llm(model:, prompt:, schema: nil)` calls `Belay.config.provider` (configure one first, e.g. `Belay::AnthropicProvider.new` - see Configuration above) and returns `response.content` directly - that return value becomes the step's own checkpointed output, so `step :extract do |ctx| ctx.llm(...) end` needs nothing further.
+`ctx.llm(model:, prompt:, schema: nil, cacheable: false)` calls `Belay.config.provider` (configure one first, e.g. `Belay::AnthropicProvider.new` - see Configuration above) and returns `response.content` directly - that return value becomes the step's own checkpointed output, so `step :extract do |ctx| ctx.llm(...) end` needs nothing further.
 
 It's `ctx.llm`, not a bare top-level `llm(...)` the way an earlier sketch of this API had it. A step's block runs via plain `.call`, not `instance_exec`, so a bare `llm(...)` would need to be a class-level method every `Workflow` subclass inherits, with no explicit per-step state - which is exactly the kind of implicit ambient context (`Thread.current`-style, or an `ActiveSupport::CurrentAttributes`-alike) `ctx` already exists to avoid. Routing it through `ctx`, which every step block already receives explicitly, needed no new state and no class-level DSL method.
 
@@ -155,6 +171,18 @@ Belay.configure { |config| config.provider = provider }
 ```
 
 `InvoiceSchema` must set `additionalProperties: false` on every object in the schema, if it's ever run against `AnthropicProvider` - Anthropic's own requirement for structured outputs. `pricing:` is deliberately not pre-filled with Anthropic's current rates - they change, and a stale hardcoded number is worse than an honest `nil`. `response.cost_cents` is `nil` for any model you haven't priced.
+
+### Caching
+
+`cacheable: true` serves an exact repeat of this exact call - same provider, `model:`, `prompt:`, and `schema:` - from `belay_cache_entries` instead of making a real call. **Never inferred from `kind:` or anything else about the step** - `kind: "llm_call"` covers both a classification call and an extraction call indistinguishably, so this is a plain, explicit choice the step author makes, the same contract `idempotent: true` already uses elsewhere: only set it on a call whose entire prompt text fully and uniquely determines the correct answer. A short, self-contained classification prompt usually qualifies; an extraction prompt that references a large document (especially over a vision/file attachment, whose bytes aren't part of what gets hashed) usually doesn't - two different documents could share a cache key and get back the wrong answer.
+
+```ruby
+step :classify, kind: "decision" do |ctx|
+  ctx.llm(model: "claude-sonnet-5-5", prompt: Prompts.urgency(ctx.subject), schema: UrgencySchema, cacheable: true)
+end
+```
+
+The cache key is `SHA256([provider class, model, prompt, schema].inspect)` - exact, literal match only; symbol- and string-keyed `prompt`/`schema` hash differently, on purpose. A response is only ever cached after `schema:` validation succeeds, so a bad answer can never get stuck replaying itself. A hit records `cache_hit: true` on the step row with zeroed tokens/cost/latency (the true cost of a hit really is zero), visible on both the run detail page and the Stats chart. `Belay.config.cache_ttl` (default 7 days, `nil` means never expires) is one global setting, read fresh on every cache write - not a per-call override.
 
 ## Roadmap
 

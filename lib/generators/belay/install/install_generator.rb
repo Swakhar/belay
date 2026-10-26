@@ -25,6 +25,14 @@ module Belay
       def create_belay_approvals_migration
         migration_template "create_belay_approvals.rb.tt", "db/migrate/create_belay_approvals.rb"
       end
+
+      # No FK into belay_runs/belay_steps - a cache entry isn't tied to any
+      # particular run, so there's no ordering dependency forcing this after
+      # the others. Still last, for the same reason every new migration this
+      # gem has ever added has been: one predictable place to look.
+      def create_belay_cache_entries_migration
+        migration_template "create_belay_cache_entries.rb.tt", "db/migrate/create_belay_cache_entries.rb"
+      end
     end
   end
 end

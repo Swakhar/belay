@@ -122,6 +122,35 @@ RSpec.describe Belay::Generators::InstallGenerator do
     expect(steps_migration).to be < approvals_migration
   end
 
+  it "defines belay_cache_entries with a unique cache_key and no FK into belay_runs/belay_steps" do
+    run_generator
+
+    content = File.read(migration_file("db/migrate/create_belay_cache_entries.rb"))
+
+    expect(content).to include("create_table :belay_cache_entries, id: :uuid")
+    %w[cache_key content hits expires_at].each { |column| expect(content).to include(":#{column}") }
+    expect(content).to include("t.string :cache_key, null: false")
+    expect(content).to include("t.integer :hits, null: false, default: 0")
+    expect(content).to include("add_index :belay_cache_entries, :cache_key, unique: true")
+    expect(content).not_to include("add_foreign_key :belay_cache_entries")
+  end
+
+  it "creates a timestamped belay_cache_entries migration that is syntactically valid Ruby" do
+    run_generator
+
+    migration = migration_file("db/migrate/create_belay_cache_entries.rb")
+    expect(migration).to match(%r{db/migrate/\d{14}_create_belay_cache_entries\.rb\z})
+    expect { RubyVM::InstructionSequence.compile_file(migration) }.not_to raise_error
+  end
+
+  it "adds cache_hit to belay_steps, defaulting to false" do
+    run_generator
+
+    content = File.read(migration_file("db/migrate/create_belay_steps.rb"))
+
+    expect(content).to include("t.boolean :cache_hit, null: false, default: false")
+  end
+
   def migration_file(relative_path)
     base = File.basename(relative_path, ".rb")
     Dir.glob(File.join(destination_root, File.dirname(relative_path), "*_#{base}.rb")).first

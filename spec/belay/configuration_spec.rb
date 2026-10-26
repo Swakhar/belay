@@ -15,15 +15,21 @@ RSpec.describe Belay::Configuration do
     expect(configuration.provider).to be_nil
   end
 
+  it "defaults cache_ttl to 7 days" do
+    expect(configuration.cache_ttl).to eq(7 * 24 * 60 * 60)
+  end
+
   it "allows overriding each setting" do
     provider = Belay::FakeProvider.new
     configuration.lease_duration = 900
     configuration.heartbeat_interval = 60
     configuration.provider = provider
+    configuration.cache_ttl = nil
 
     expect(configuration.lease_duration).to eq(900)
     expect(configuration.heartbeat_interval).to eq(60)
     expect(configuration.provider).to equal(provider)
+    expect(configuration.cache_ttl).to be_nil
   end
 end
 

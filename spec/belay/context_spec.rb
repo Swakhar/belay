@@ -144,6 +144,80 @@ RSpec.describe Belay::Context do
       expect(provider.calls.sole[:model]).to eq("claude-sonnet-5-5")
     end
 
+    describe "cacheable:" do
+      it "does not consult the cache at all when omitted - the default, common case" do
+        provider = Belay::FakeProvider.new(responses: %w[a b])
+        Belay.configure { |c| c.provider = provider }
+        ctx = described_class.new
+
+        first = ctx.llm(model: "x", prompt: "hi")
+        second = ctx.llm(model: "x", prompt: "hi")
+
+        expect([first, second]).to eq(%w[a b]) # both real calls, never served from a cache
+        expect(provider.calls.size).to eq(2)
+      end
+
+      it "calls the provider for real on a cache miss, then serves the next identical call from the cache" do
+        provider = Belay::FakeProvider.new(responses: ["real answer"])
+        Belay.configure { |c| c.provider = provider }
+
+        first = described_class.new.llm(model: "x", prompt: "hi", cacheable: true)
+        second = described_class.new.llm(model: "x", prompt: "hi", cacheable: true)
+
+        expect(first).to eq("real answer")
+        expect(second).to eq("real answer")
+        expect(provider.calls.size).to eq(1) # the second call never reached the provider
+      end
+
+      it "records cache_hit: true and zeroed tokens/cost/latency on a hit, not nil - the true cost really is zero" do
+        provider = Belay::FakeProvider.new(responses: [{ "a" => 1 }])
+        Belay.configure { |c| c.provider = provider }
+        described_class.new.llm(model: "x", prompt: "hi", schema: { type: "object" }, cacheable: true)
+        ctx = described_class.new
+
+        ctx.llm(model: "x", prompt: "hi", schema: { type: "object" }, cacheable: true)
+
+        expect(ctx.llm_metadata).to include(cache_hit: true, input_tokens: 0, output_tokens: 0, cost_cents: 0,
+                                            latency_ms: 0)
+      end
+
+      it "records cache_hit: false on a real call, whether or not cacheable: was given" do
+        provider = Belay::FakeProvider.new(responses: ["x"])
+        Belay.configure { |c| c.provider = provider }
+        ctx = described_class.new
+
+        ctx.llm(model: "x", prompt: "hi", cacheable: true)
+
+        expect(ctx.llm_metadata[:cache_hit]).to be false
+      end
+
+      it "does not cache a response that fails schema validation - a bad cached answer would never self-correct" do
+        provider = Belay::FakeProvider.new(responses: [{}, { "total_cents" => 4200 }])
+        Belay.configure { |c| c.provider = provider }
+        schema = { "type" => "object", "properties" => { "total_cents" => { "type" => "integer" } },
+                   "required" => ["total_cents"] }
+
+        expect { described_class.new.llm(model: "x", prompt: "hi", schema: schema, cacheable: true) }
+          .to raise_error(Belay::Context::SchemaValidationError)
+        result = described_class.new.llm(model: "x", prompt: "hi", schema: schema, cacheable: true)
+
+        expect(result).to eq("total_cents" => 4200) # the second, valid response - not cached-then-replayed
+        expect(provider.calls.size).to eq(2) # both were real calls; the failed one was never served from cache
+      end
+
+      it "serves a cached response of false - the cache must not mistake a falsy answer for a miss" do
+        provider = Belay::FakeProvider.new(responses: [Belay::ProviderResponse.new(model: "x", content: false)])
+        Belay.configure { |c| c.provider = provider }
+
+        first = described_class.new.llm(model: "x", prompt: "hi", cacheable: true)
+        second = described_class.new.llm(model: "x", prompt: "hi", cacheable: true)
+
+        expect(first).to be false
+        expect(second).to be false
+        expect(provider.calls.size).to eq(1) # the second call must be served from the cache, not a real call
+      end
+    end
+
     describe "schema validation" do
       let(:schema) do
         { "type" => "object", "properties" => { "total_cents" => { "type" => "integer" } },
@@ -179,7 +253,8 @@ RSpec.describe Belay::Context do
 
         expect { ctx.llm(model: "x", prompt: "extract", schema: schema) }.to raise_error(Belay::Context::SchemaValidationError)
         expect(ctx.llm_metadata).to eq(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input: "extract",
-                                       input_tokens: nil, output_tokens: nil, cost_cents: 18, latency_ms: nil)
+                                       cache_hit: false, input_tokens: nil, output_tokens: nil, cost_cents: 18,
+                                       latency_ms: nil)
       end
 
       it "accepts a symbol-keyed schema, not just string-keyed" do
@@ -234,7 +309,8 @@ RSpec.describe Belay::Context do
       ctx.llm(model: "claude-sonnet-5-5", prompt: "hi")
 
       expect(ctx.llm_metadata).to eq(provider: "Belay::FakeProvider", model: "claude-sonnet-5-5", input: "hi",
-                                     input_tokens: 10, output_tokens: 5, cost_cents: 18, latency_ms: 420)
+                                     cache_hit: false, input_tokens: 10, output_tokens: 5, cost_cents: 18,
+                                     latency_ms: 420)
     end
 
     it "records whatever prompt: was given verbatim, not a summary of it" do

@@ -75,27 +75,32 @@ module Belay
     # (set only on a replay's shadow run) takes precedence, so a replayed
     # llm_call step actually calls the overriding model without the workflow
     # body itself needing to know anything about replay.
-    def llm(model:, prompt:, schema: nil)
+    #
+    # cacheable: false by default - opt-in, exact-match caching (DESIGN_
+    # DECISIONS #10, Belay::CacheEntry). Deliberately not inferred from
+    # kind: or anything else about the step: "decision steps only" can't be
+    # enforced mechanically (kind: "llm_call" covers both a classification
+    # AND an extraction call; Belay has no way to tell them apart), so this
+    # is a plain, explicit choice the step author makes, the same contract
+    # idempotent: true already uses elsewhere - only set this on a step
+    # whose ENTIRE prompt text fully and uniquely determines the correct
+    # answer. A short, self-contained classification prompt usually
+    # qualifies; an extraction prompt that references a large document
+    # (especially over a vision/file attachment, whose bytes aren't part of
+    # what gets hashed) usually doesn't - two different documents could
+    # share a cache key and get back the wrong answer.
+    def llm(model:, prompt:, schema: nil, cacheable: false)
       effective_model = @model_override || model
       provider = resolve_provider!
+      call_args = { provider: provider, model: effective_model, prompt: prompt, schema: schema }
+
+      cached = fetch_cached_llm_response(**call_args) if cacheable
+      return cached unless cached.nil?
+
       response = provider.call(model: effective_model, prompt: prompt, schema: schema)
-
-      # Recorded before validating, not after: provider.call above already made a
-      # real, billed request by the time we know whether its content matches
-      # schema:. A response that fails validation raises below and this step's
-      # row ends up "failed" - run_attempt's dual-merge (see executor.rb) persists
-      # whatever's in @llm_metadata onto that failed row regardless, which only
-      # works if the merge already happened before the raise, not after it.
-      fields = response.to_h.slice(:model, :input_tokens, :output_tokens, :cost_cents, :latency_ms)
-      # input: prompt, not :prompt - matches belay_steps' own column name exactly
-      # (same reasoning as every other key here: extra_step_attrs below merges
-      # this whole hash straight into step.update!, with no translation step in
-      # between), so the dashboard's run page (feat(dashboard): run page with
-      # step timeline, prompt, response, tokens and cost) has something real to
-      # show as "prompt" - the exact value passed to ctx.llm, not a summary of it.
-      @llm_metadata.merge!(provider: provider.class.name, input: prompt, **fields)
-
+      record_llm_metadata!(provider: provider, prompt: prompt, response: response)
       validate_against_schema!(response.content, schema) if schema
+      store_cached_llm_response!(**call_args, content: response.content) if cacheable
       response.content
     end
 
@@ -129,6 +134,50 @@ module Belay
       Belay.config.provider || raise(Error, "Belay.config.provider is not set - configure one before calling " \
                                             "ctx.llm, e.g. Belay.configure { |c| c.provider = " \
                                             "Belay::AnthropicProvider.new }")
+    end
+
+    # nil on a cache miss (or an expired entry) - the caller falls through to
+    # a real provider call either way, same as CacheEntry.fetch's own nil
+    # means to its two callers. Assumes a cached response's content is never
+    # itself nil, which ProviderResponse's own validation already guarantees
+    # (content is required) - there's no cacheable response this could ever
+    # mistake for a miss.
+    #
+    # input_tokens/output_tokens/cost_cents/latency_ms are 0, not nil, for a
+    # hit - nil already means something specific elsewhere (e.g. cost_cents
+    # is nil when no pricing: was configured for a REAL call - "we don't
+    # know"), and a hit's true cost really is zero, not unknown.
+    def fetch_cached_llm_response(provider:, model:, prompt:, schema:)
+      content = CacheEntry.fetch(provider: provider, model: model, prompt: prompt, schema: schema)
+      return nil if content.nil?
+
+      @llm_metadata.merge!(provider: provider.class.name, input: prompt, model: model, cache_hit: true,
+                           input_tokens: 0, output_tokens: 0, cost_cents: 0, latency_ms: 0)
+      content
+    end
+
+    # Called only after validate_against_schema! has already passed (see #llm) -
+    # a response that fails validation never reaches here, so no cacheable: true
+    # key is ever stuck returning a bad answer forever.
+    def store_cached_llm_response!(provider:, model:, prompt:, schema:, content:)
+      CacheEntry.store!(provider: provider, model: model, prompt: prompt, schema: schema, content: content)
+    end
+
+    # Recorded before validating, not after: provider.call above already made a real,
+    # billed request by the time we know whether its content matches schema:. A response
+    # that fails validation raises below and this step's row ends up "failed" -
+    # run_attempt's dual-merge (see executor.rb) persists whatever's in @llm_metadata onto
+    # that failed row regardless, which only works if the merge already happened before
+    # the raise, not after it.
+    #
+    # input: prompt, not :prompt - matches belay_steps' own column name exactly (same
+    # reasoning as every other key here: extra_step_attrs below merges this whole hash
+    # straight into step.update!, with no translation step in between), so the dashboard's
+    # run page has something real to show as "prompt" - the exact value passed to
+    # ctx.llm, not a summary of it.
+    def record_llm_metadata!(provider:, prompt:, response:)
+      fields = response.to_h.slice(:model, :input_tokens, :output_tokens, :cost_cents, :latency_ms)
+      @llm_metadata.merge!(provider: provider.class.name, input: prompt, cache_hit: false, **fields)
     end
 
     def validate_against_schema!(content, schema)

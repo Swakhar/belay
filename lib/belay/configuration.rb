@@ -22,11 +22,19 @@ module Belay
     # serving it unauthenticated. See lib/belay/application_controller.rb.
     attr_accessor :authenticate_with
 
+    # How long a ctx.llm(..., cacheable: true) entry stays valid, in seconds.
+    # nil means never expires. One global setting, not a per-call override -
+    # cacheable: is already the one knob a step author needs; a second
+    # ttl: keyword on every ctx.llm call would be more API surface for a
+    # distinction most workflows don't need to make per-step.
+    attr_accessor :cache_ttl
+
     def initialize
       @lease_duration = 300
       @heartbeat_interval = 30
       @provider = nil
       @authenticate_with = nil
+      @cache_ttl = 7 * 24 * 60 * 60 # 7 days
     end
   end
 end

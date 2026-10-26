@@ -5,7 +5,13 @@ class CreateBelayCacheEntries < ActiveRecord::Migration[<%= ActiveRecord::Migrat
       # literal match only (symbol vs string key differences in prompt/schema
       # are NOT normalized before hashing - a deliberately stricter, simpler
       # bar than "semantically equivalent"). See Belay::CacheEntry.key_for.
-      t.string :cache_key, null: false
+      #
+      # Named "key", not "cache_key" - ActiveRecord::Base already defines a
+      # #cache_key method of its own (used for fragment-caching/ETag support),
+      # and Rails 7's DangerousAttributeError refuses to let a real column
+      # shadow it. "key" is unambiguous enough inside a model whose own table
+      # is already named belay_cache_entries.
+      t.string :key, null: false
       t.jsonb :content
       t.integer :hits, null: false, default: 0
       # nil means "never expires" - Belay.config.cache_ttl's default is a real
@@ -16,6 +22,6 @@ class CreateBelayCacheEntries < ActiveRecord::Migration[<%= ActiveRecord::Migrat
       t.timestamps
     end
 
-    add_index :belay_cache_entries, :cache_key, unique: true
+    add_index :belay_cache_entries, :key, unique: true
   end
 end

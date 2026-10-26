@@ -122,16 +122,16 @@ RSpec.describe Belay::Generators::InstallGenerator do
     expect(steps_migration).to be < approvals_migration
   end
 
-  it "defines belay_cache_entries with a unique cache_key and no FK into belay_runs/belay_steps" do
+  it "defines belay_cache_entries with a unique key and no FK into belay_runs/belay_steps" do
     run_generator
 
     content = File.read(migration_file("db/migrate/create_belay_cache_entries.rb"))
 
     expect(content).to include("create_table :belay_cache_entries, id: :uuid")
-    %w[cache_key content hits expires_at].each { |column| expect(content).to include(":#{column}") }
-    expect(content).to include("t.string :cache_key, null: false")
+    %w[key content hits expires_at].each { |column| expect(content).to include(":#{column}") }
+    expect(content).to include("t.string :key, null: false")
     expect(content).to include("t.integer :hits, null: false, default: 0")
-    expect(content).to include("add_index :belay_cache_entries, :cache_key, unique: true")
+    expect(content).to include("add_index :belay_cache_entries, :key, unique: true")
     expect(content).not_to include("add_foreign_key :belay_cache_entries")
   end
 

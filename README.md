@@ -8,6 +8,31 @@ It sits under whatever prompting style you use and records everything. It is not
 
 **Status:** pre-release (`v0.1.0.pre1`). Core runtime, gates & approvals, replay, caching & rules, and the dashboard are implemented and proven with real process kills and real concurrent workers, not just designed - see [DESIGN_DECISIONS.md #13](DESIGN_DECISIONS.md).
 
+## How it works
+
+```mermaid
+flowchart TD
+    Start(["YourWorkflow.start(input)"]) --> Running["running
+each step checkpointed
+before the next one runs"]
+    Running -->|every step ran| Completed(["completed"])
+    Running -->|"gate's when: true"| Paused["paused
+awaiting a human"]
+    Paused -->|"run.approve!"| Running
+    Paused -->|"run.reject!"| Failed(["failed"])
+    Running -->|"crash mid-step
+not idempotent"| NeedsReview["needs_review
+awaiting a human"]
+    NeedsReview -->|"run.resolve_needs_review!"| Running
+    Running -->|"crash mid-step
+idempotent: true"| Running
+    Running -->|unhandled error| Failed
+    Completed -.->|"run.replay(model:)"| Shadow(["shadow run
+diffed against the original"])
+```
+
+Every box is a real `run.status`; every arrow is a real method on `Belay::Run` (or the crash-recovery policy a step's own `idempotent:` declares). This is the run-level picture - each individual step is its own checkpointed database row underneath it.
+
 ## Installation
 
 ```ruby

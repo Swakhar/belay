@@ -26,6 +26,14 @@ flowchart TD
 
 Every box is a real `run.status`; every arrow is a real method on `Belay::Run` (or the crash-recovery policy a step's own `idempotent:` declares). This is the run-level picture - each individual step is its own checkpointed database row underneath it.
 
+| Method | Called when |
+|---|---|
+| `Workflow.start(**input, idempotency_key:)` | Kick off a new run. |
+| `run.approve!(by:, edited_payload: nil)` | A gate is paused (`run.pending_gate` present) and a human says "proceed." |
+| `run.reject!(by:)` | A gate is paused and a human says "no, stop." |
+| `run.resolve_needs_review!(by:, outcome:, output: nil)` | A step crashed non-idempotently (`run.pending_needs_review` present) and a human confirms what actually happened. |
+| `run.replay(model:)` | A run has `completed`, and you want to compare it against a different model. |
+
 ## Installation
 
 ```ruby

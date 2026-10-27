@@ -6,7 +6,7 @@ Sidekiq gives you durable background jobs. Belay gives you durable *AI* jobs —
 
 It sits under whatever prompting style you use and records everything. It is not a prompt library, not a chain-builder DSL, and not a wrapper that hides your LLM SDK.
 
-**Status:** pre-release (`v0.1.0.pre1`). Core runtime, gates & approvals, replay, caching & rules, and the dashboard are implemented and proven with real process kills and real concurrent workers, not just designed - see [DESIGN_DECISIONS.md #13](DESIGN_DECISIONS.md).
+**Status:** early release (`v0.1.0`). Core runtime, gates & approvals, replay, caching & rules, and the dashboard are implemented and proven with real process kills and real concurrent workers, not just designed - see [DESIGN_DECISIONS.md #13](DESIGN_DECISIONS.md).
 
 **Docs:** [swakhar.github.io/belay](https://swakhar.github.io/belay/) for the browsable version of everything under `docs/`.
 

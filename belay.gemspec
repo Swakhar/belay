@@ -15,7 +15,8 @@ Gem::Specification.new do |spec|
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.2.0"
 
-  spec.metadata["homepage_uri"] = spec.homepage
+  # homepage_uri isn't set separately here: it would just duplicate spec.homepage
+  # above, which RubyGems already shows as the gem's Homepage link.
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
   spec.metadata["bug_tracker_uri"] = "#{spec.homepage}/issues"

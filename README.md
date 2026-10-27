@@ -36,6 +36,14 @@ Every box is a real `run.status`; every arrow is a real method on `Belay::Run` (
 | `run.resolve_needs_review!(by:, outcome:, output: nil)` | A step crashed non-idempotently (`run.pending_needs_review` present) and a human confirms what actually happened. |
 | `run.replay(model:)` | A run has `completed`, and you want to compare it against a different model. |
 
+### Crash and resume, for real
+
+A worker process running a 3-step invoice workflow gets `kill -9`'d mid-step. The next thing that notices - here, `Belay::JanitorJob`, the same job a real app schedules on a cron - reclaims the run and resumes it. `extract` and `verify` were already checkpointed, so they never re-run; only the interrupted `book` step (declared `idempotent: true`) does, safely.
+
+![A terminal recording: a Rails process running an invoice workflow gets kill -9'd mid-step, then Belay::JanitorJob reclaims and resumes the run, re-running only the interrupted step](docs/images/crash-and-resume.gif)
+
+Full source for this demo - the workflow, the fake provider, and the two scripts shown above - is [belay-demo](https://github.com/Swakhar/belay-demo).
+
 ## Installation
 
 ```ruby

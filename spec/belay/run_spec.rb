@@ -299,6 +299,98 @@ RSpec.describe Belay::Run do
     end
   end
 
+  # :real_connections (see spec_helper.rb) - heartbeat_while spawns a real Thread
+  # paired with ActiveRecord::Base.connection_pool.with_connection to call
+  # heartbeat_lease! from a genuinely separate connection, same mechanism
+  # spec/concurrency_spec.rb already needs this tag for. Without it, every one
+  # of these tests would run inside this suite's default rolled-back-at-the-end
+  # transaction, invisible to that second connection - acquire_lease!'s own
+  # UPDATE would never be visible to the heartbeat thread's connection, so
+  # every heartbeat_lease! call would see lease_owner as still NULL and fail.
+  # Tests tagged :real_connections clean up their own rows explicitly - nothing
+  # rolls them back automatically.
+  describe "#heartbeat_while", :real_connections do
+    after { Belay::Run.where(id: @created_run_ids).delete_all if @created_run_ids }
+
+    def tracked_run(**attrs)
+      run = build_run(**attrs)
+      (@created_run_ids ||= []) << run.id
+      run
+    end
+
+    it "runs the block and returns its value" do
+      run = tracked_run
+
+      result = run.heartbeat_while { 42 }
+
+      expect(result).to eq(42)
+    end
+
+    it "propagates an exception raised inside the block, rather than swallowing it" do
+      run = tracked_run
+      run.acquire_lease!(owner: "worker-1")
+
+      expect { run.heartbeat_while { raise "boom" } }.to raise_error("boom")
+    end
+
+    it "doesn't heartbeat at all when the run holds no lease - lease_owner stays nil, exactly as before" do
+      run = tracked_run
+      expect(run).not_to receive(:heartbeat_lease!)
+
+      run.heartbeat_while { nil }
+
+      expect(run.reload.lease_owner).to be_nil
+    end
+
+    it "heartbeats the held lease at least once while a block runs longer than one heartbeat_interval" do
+      Belay.configure { |c| c.heartbeat_interval = 0.01 }
+      run = tracked_run
+      run.acquire_lease!(owner: "worker-1")
+      calls = 0
+      allow(run).to(receive(:heartbeat_lease!).and_wrap_original do |original, **kwargs|
+        calls += 1
+        original.call(**kwargs)
+      end)
+
+      run.heartbeat_while { sleep(0.05) }
+
+      expect(calls).to be >= 2
+    end
+
+    it "stops heartbeating once the block returns, rather than leaking a background thread that keeps " \
+       "renewing the lease after the call is done" do
+      Belay.configure { |c| c.heartbeat_interval = 0.01 }
+      run = tracked_run
+      run.acquire_lease!(owner: "worker-1")
+      calls = 0
+      allow(run).to(receive(:heartbeat_lease!).and_wrap_original do |original, **kwargs|
+        calls += 1
+        original.call(**kwargs)
+      end)
+
+      run.heartbeat_while { nil } # instant - the heartbeat thread should barely get a chance to run at all
+      calls_right_after = calls
+      sleep(0.1) # many heartbeat_interval's worth - a leaked thread would keep counting during this
+
+      expect(calls).to eq(calls_right_after)
+    end
+
+    it "swallows an exception that kills its own heartbeat thread, rather than letting a transient " \
+       "background hiccup override the real block's own successful result" do
+      Belay.configure { |c| c.heartbeat_interval = 0.01 }
+      run = tracked_run
+      run.acquire_lease!(owner: "worker-1")
+      allow(run).to receive(:heartbeat_lease!).and_raise("transient DB hiccup")
+
+      result = run.heartbeat_while do
+        sleep(0.03)
+        "actual result"
+      end
+
+      expect(result).to eq("actual result")
+    end
+  end
+
   describe "#pending_gate" do
     it "returns nil when the run has no awaiting_approval step" do
       run = build_run.tap(&:start!)

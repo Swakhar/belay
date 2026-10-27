@@ -248,10 +248,19 @@ module Belay
         [nil, e]
       end
 
+      # Wrapped in @run.heartbeat_while, not called bare - this is the one call in
+      # the whole step/gate lifecycle that can plausibly run longer than
+      # lease_duration (a model call, or a gate's own when: doing something
+      # slow), so it's the only thing that needs a concurrent heartbeat. Every
+      # other method here (checkpointing, retries, dispatch) is fast,
+      # synchronous Ruby - heartbeating around those too would just spin up
+      # threads for no reason.
       def run_block(step_run, context, step)
-        return evaluate_gate!(step_run, context, step) if step_run.step_definition.kind == :gate
+        @run.heartbeat_while do
+          next evaluate_gate!(step_run, context, step) if step_run.step_definition.kind == :gate
 
-        step_run.step_definition.block.call(context)
+          step_run.step_definition.block.call(context)
+        end
       end
 
       def settled_status(step_run)

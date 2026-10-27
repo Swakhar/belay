@@ -135,15 +135,56 @@ module Belay
       true
     end
 
+    # Heartbeats this run's lease, in a background thread, for as long as the
+    # given block runs - closes the gap named in JanitorJob's and
+    # ResumeRunJob's own comments and DESIGN_DECISIONS #12/#13. Step execution
+    # is synchronous Ruby, not async - the only way to renew a lease WHILE a
+    # single slow step (a model call that outruns lease_duration) is still in
+    # flight is a second thread doing it concurrently with the first.
+    #
+    # No-ops (just yields, no thread spun up) when this run holds no lease at
+    # all: lease_owner is nil both for a run that's never been through
+    # acquire_lease! (Workflow.start's inline path - today's realistic case,
+    # per JanitorJob's own comment) and for one whose lease was already
+    # released. heartbeat_lease!(owner: nil) would also just safely return
+    # false every time on its own (nil never matches a real owner, and a NULL
+    # lease_expires_at never satisfies >= Time.current either) - skipping the
+    # thread entirely is purely to avoid spinning one up for nothing on the
+    # common no-lease path, not a correctness requirement.
+    #
+    # Only ever renews - never aborts the block early on a lease it discovers
+    # is lost. There's no safe way to interrupt a step already mid-flight from
+    # outside it (Thread#raise into an arbitrary point in someone else's code
+    # is exactly the leaves-things-half-done unsafety this gem exists to avoid
+    # elsewhere). Losing that race is still handled the same way it already
+    # was: another worker's acquire_lease! simply won't match a lease that's
+    # genuinely still live, and JanitorJob/lease contention at the DB layer
+    # remains the real backstop - heartbeating just makes reaching it, while a
+    # worker is still legitimately running, far less likely in practice.
+    def heartbeat_while
+      return yield if lease_owner.nil?
+
+      owner = lease_owner
+      stop = false
+      thread = Thread.new { heartbeat_until_stopped(owner) { stop } }
+
+      yield
+    ensure
+      stop = true
+      stop_heartbeat_thread(thread)
+    end
+
     # Unconditional, unlike acquire_lease!/heartbeat_lease! - both take an owner:
     # and defend against racing another worker; this doesn't check who (if
-    # anyone) currently holds the lease. That's an honest limitation of what's
-    # wired up today, not a deliberate safety choice: Executor/StepRunner, the
-    # only caller so far (evaluate_gate!, pausing on a true gate), has no owner
-    # identity of its own to check against - it's constructed as
-    # Executor.new(run), with no owner: ever threaded through from whichever job
-    # (if any) called it. Revisit if that changes; for now this just clears
-    # whatever is there.
+    # anyone) currently holds the lease. Still an honest limitation of what's
+    # wired up today, not a deliberate safety choice - but no longer "no owner
+    # identity to check against": heartbeat_while (above) shows a caller CAN
+    # read this run's own lease_owner column instead of needing one threaded
+    # through from whichever job constructed the Executor. pause_on_gate!, the
+    # only caller of this method, just hasn't been changed to use that same
+    # trick and check it before releasing - revisit if that ever matters (a
+    # gate pausing a run some OTHER worker's lease is still actively
+    # heartbeating against would be the failure mode).
     def release_lease! # rubocop:disable Naming/PredicateMethod
       update!(lease_owner: nil, lease_expires_at: nil)
       true
@@ -316,6 +357,58 @@ module Belay
     end
 
     private
+
+    # The thread body heartbeat_while spawns - a separate method, not inlined
+    # into Thread.new's block, specifically so it can wrap itself in
+    # connection_pool.with_connection: a thread ActiveRecord doesn't already
+    # manage the lifecycle of (unlike a request or an ActiveJob perform) has
+    # to explicitly check its DB connection back into the pool when it's done,
+    # or it leaks a pooled connection every time this runs. stopped? is a
+    # block, not a plain boolean, because by the time this thread actually
+    # checks it, heartbeat_while's own local stop may have changed - a Proc
+    # re-reads the enclosing variable's current value each call, a plain
+    # argument would have captured it once, stale, at Thread.new time.
+    # wakeup is only to make the thread notice stop promptly instead of
+    # finishing out its current sleep(heartbeat_interval) first - join is what
+    # actually matters, to guarantee the thread (and its own checked-out DB
+    # connection) is gone before heartbeat_while returns. wakeup raises
+    # ThreadError on a thread that's already terminated (its own
+    # heartbeat_lease! already returned false and it exited the loop on its
+    # own) - an expected, not exceptional, outcome here.
+    #
+    # join's own error is swallowed too (ignoring_errors covers both calls),
+    # and that one matters far more than it looks: if this thread died from
+    # an unhandled exception (a transient ActiveRecord::StatementInvalid from
+    # heartbeat_lease! itself, say), Thread#join re-raises that exception IN
+    # THE CALLING THREAD - here, that's heartbeat_while's own ensure, which
+    # runs regardless of whether the real step block above it just succeeded.
+    # Letting that through would mean a purely advisory background thread
+    # hiccuping could silently discard a step that actually completed
+    # successfully, turning a harmless heartbeat blip into a failed (and
+    # possibly retried) step. This thread only ever renews a lease on a
+    # best-effort basis; nothing it does should ever override the real
+    # block's own outcome.
+    def stop_heartbeat_thread(thread)
+      return unless thread
+
+      ignoring_errors { thread.wakeup }
+      ignoring_errors { thread.join }
+    end
+
+    def ignoring_errors
+      yield
+    rescue StandardError
+      nil
+    end
+
+    def heartbeat_until_stopped(owner)
+      ActiveRecord::Base.connection_pool.with_connection do
+        until yield
+          sleep(Belay.config.heartbeat_interval)
+          break if yield || !heartbeat_lease!(owner: owner)
+        end
+      end
+    end
 
     def resolve_succeeded!(step, by:, output:)
       ActiveRecord::Base.transaction do

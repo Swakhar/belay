@@ -13,13 +13,14 @@ module Belay
   #
   # If acquire_lease! fails, another worker already holds this run (or is between
   # attempts with time still left on its lease) - this job quietly returns rather
-  # than erroring or forcing its way in. Nothing here heartbeats the lease while the
-  # executor runs, or releases it afterward: both are real gaps for a run with many
-  # steps or a long single step (see DESIGN_DECISIONS #12's 300s default - a step
-  # slower than that outruns the lease with nothing renewing it), left for whenever
-  # Executor exposes a per-step hook to call heartbeat_lease! from, which it doesn't
-  # yet. JanitorJob (not built) reclaiming an expired lease is what currently
-  # recovers from that, same as it recovers from a crash.
+  # than erroring or forcing its way in. Nothing here heartbeats the lease itself -
+  # Executor::StepRunner does, via Run#heartbeat_while, for as long as any single
+  # step/gate is actually in flight (see DESIGN_DECISIONS #12/#13) - and nothing
+  # releases it afterward either: a terminal run (completed/failed) is left holding
+  # its lease, harmless today since every caller of acquire_lease! already scopes to
+  # status: running first (see Run#release_lease!'s own comment). JanitorJob
+  # reclaiming an expired lease is what recovers from a crash, or from a step
+  # genuinely slower than heartbeat_while's own thread can keep renewing for.
   #
   # No retries: are configured on this class today, which matters because job_id is
   # NOT fresh across an ActiveJob-level retry - retry_job copies the failed attempt's

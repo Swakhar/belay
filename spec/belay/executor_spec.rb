@@ -717,4 +717,60 @@ RSpec.describe Belay::Executor do
       expect { described_class.new(run).call }.to raise_error(Belay::Error, /#{run.id}.*NotARealConstant/)
     end
   end
+
+  # :real_connections (see spec_helper.rb) - the step's own block below opens a
+  # SECOND, genuinely separate connection (Belay::Run.find(run.id), not the
+  # same in-memory run) to simulate a different worker, the same reason
+  # spec/concurrency_spec.rb needs this tag: that second connection can only
+  # see what this one has actually committed, never this transaction's own
+  # still-open writes. No automatic rollback for a :real_connections example -
+  # cleaned up explicitly below instead.
+  describe "heartbeating the lease while a step is in flight", :real_connections do
+    after do
+      Belay::Step.where(run: @run).delete_all
+      @run&.destroy
+    end
+
+    # run is declared (nil) before the workflow class, not after - the step's
+    # own block below needs to close over it, but it's only actually assigned
+    # a real Run once build_run runs, well after this class literal is
+    # defined. A plain local variable earlier in the same method scope is all
+    # Ruby needs for the block to capture it by reference rather than treat
+    # the bare word as a method call.
+    it "renews a held lease while a slow step runs, so a step slower than lease_duration keeps its lease " \
+       "instead of losing it to a concurrent worker (e.g. JanitorJob reclaiming what would otherwise look " \
+       "like an expired run)" do
+      # 10x ratio between lease_duration and heartbeat_interval, matching
+      # DESIGN_DECISIONS #12's real production ratio (300s/30s) rather than
+      # some arbitrary tighter one - and the step sleeps for several multiples
+      # of lease_duration, not just barely past it, so the lease needs only
+      # ONE heartbeat out of ~20 to land anywhere in that window to stay
+      # valid. A tighter margin here was observed to flake under load (a
+      # single delayed heartbeat_lease! round-trip was enough to miss a
+      # 50ms-wide window) - this isn't testing exact timing, just that
+      # heartbeating happens often enough in practice to matter.
+      Belay.configure do |c|
+        c.lease_duration = 0.1
+        c.heartbeat_interval = 0.01
+      end
+      run = nil
+      reclaimed_by_worker_two = nil
+      stub_const("ExecutorSpecSlowStepWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:slow) do |_ctx|
+          sleep(0.3) # several multiples of lease_duration - long gone by now without heartbeating
+          reclaimed_by_worker_two = Belay::Run.find(run.id).acquire_lease!(owner: "worker-2")
+          "done"
+        end
+      end)
+      run = build_run(workflow_class: ExecutorSpecSlowStepWorkflow)
+      @run = run
+      run.acquire_lease!(owner: "worker-1")
+
+      described_class.new(run).call
+
+      expect(reclaimed_by_worker_two).to be false
+      expect(run.reload.lease_owner).to eq("worker-1") # worker-1's lease, never stolen mid-step
+    end
+  end
 end

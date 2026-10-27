@@ -21,19 +21,17 @@ module Belay
   # Nothing schedules this job on a recurring basis - that's a host app's concern
   # (cron, sidekiq-cron, whenever, etc.), not this gem's.
   #
-  # Real gap, not just theoretical, on review: DESIGN_DECISIONS #12 sizes
-  # lease_duration/heartbeat_interval assuming something heartbeats roughly every
-  # heartbeat_interval while a step is in flight, so a live worker's lease never
-  # actually goes stale under this job's nose. That per-step heartbeat loop doesn't
-  # exist yet - Executor has no hook to call heartbeat_lease! from mid-step (same gap
-  # ResumeRunJob's comment already names). Until it does, any step that runs longer
-  # than lease_duration makes its own lease genuinely expire while its worker is
-  # still inside it, and this job will legitimately reclaim it: a second
-  # Executor.new(run).call then runs concurrently with the first, which can race the
-  # same belay_steps row (one side's flag_needs_review! update colliding with the
-  # other side's succeeded/failed update) rather than cleanly lose a lease-contention
-  # check. Safe to run only once Executor exposes that per-step heartbeat hook, or
-  # against workloads where no single step can plausibly run past lease_duration.
+  # DESIGN_DECISIONS #12 sizes lease_duration/heartbeat_interval assuming
+  # something heartbeats roughly every heartbeat_interval while a step is in
+  # flight, so a live worker's lease never actually goes stale under this
+  # job's nose - Run#heartbeat_while (wired into Executor::StepRunner#run_block)
+  # is that something, a background thread renewing the lease for as long as
+  # a single step's own block or gate when: is running. A step genuinely
+  # slower than heartbeat_while's own thread can keep up with (the process
+  # died, or heartbeat_lease! itself started failing because another worker
+  # already won the lease) still falls through to this job reclaiming it,
+  # same as before - heartbeating narrows the race, it doesn't close it by
+  # itself for every possible failure mode.
   class JanitorJob < ActiveJob::Base
     def perform
       stale_runs.find_each do |run|

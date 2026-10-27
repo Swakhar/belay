@@ -27,12 +27,17 @@ module Belay
       "started" => :sky
     }.freeze
 
+    # Tinted-on-dark, not the light "-100 bg / -800 text" pairing a white page
+    # would use (Phase 5's dark-mode redesign) - a translucent background at
+    # the same lightness step as the text color keeps each badge legible
+    # against the dark card surface it sits on, rather than becoming a solid
+    # light rectangle that'd clash with everything around it.
     BADGE_CLASSES = {
-      emerald: "bg-emerald-100 text-emerald-800",
-      amber: "bg-amber-100 text-amber-800",
-      rose: "bg-rose-100 text-rose-800",
-      sky: "bg-sky-100 text-sky-800",
-      slate: "bg-slate-100 text-slate-700"
+      emerald: "bg-emerald-500/10 text-emerald-400",
+      amber: "bg-amber-500/10 text-amber-400",
+      rose: "bg-rose-500/10 text-rose-400",
+      sky: "bg-sky-500/10 text-sky-400",
+      slate: "bg-slate-500/10 text-slate-400"
     }.freeze
 
     def status_badge(status)

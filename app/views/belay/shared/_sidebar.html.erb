@@ -1,0 +1,22 @@
+<aside class="flex w-56 shrink-0 flex-col gap-6 border-r border-slate-800 bg-slate-900/60 px-4 py-6">
+  <div class="px-2">
+    <%= link_to runs_path, class: "flex items-center gap-2 text-base font-semibold text-slate-100" do %>
+      <span class="h-2 w-2 rounded-sm bg-violet-400"></span>
+      Belay
+    <% end %>
+    <p class="mt-1 text-xs text-slate-500">durable AI runs</p>
+  </div>
+
+  <nav class="flex flex-col gap-1 text-sm">
+    <%= link_to runs_path,
+                class: "rounded-md px-3 py-2 font-medium #{current_page?(runs_path) ? 'bg-violet-500/10 text-slate-100' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'}" do %>
+      Runs
+    <% end %>
+    <%= link_to stats_path,
+                class: "rounded-md px-3 py-2 font-medium #{current_page?(stats_path) ? 'bg-violet-500/10 text-slate-100' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'}" do %>
+      Stats
+    <% end %>
+  </nav>
+
+  <p class="mt-auto px-2 text-xs text-slate-600">mounted at /belay</p>
+</aside>

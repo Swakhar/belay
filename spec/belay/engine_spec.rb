@@ -40,13 +40,13 @@ RSpec.describe Belay::Engine do
     expect(session.response.status).to eq(200)
   end
 
-  it "renders the shared navbar on every page, linking back to the runs index" do
+  it "renders the shared sidebar on every page, linking back to the runs index" do
     Belay.configure { |c| c.authenticate_with = ->(_request) { true } }
 
     session = get("/belay/")
 
     doc = Nokogiri::HTML(session.response.body)
-    expect(doc.css("header a").map { |a| a["href"] }).to include("/belay/runs")
+    expect(doc.css("aside a").map { |a| a["href"] }).to include("/belay/runs")
   end
 
   it "passes the real ActionDispatch::Request to the authenticator, not a stand-in" do

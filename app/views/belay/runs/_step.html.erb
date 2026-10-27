@@ -2,20 +2,20 @@
 
 <div class="flex gap-4">
   <div class="flex flex-col items-center">
-    <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100
-                text-xs font-semibold text-slate-600">
+    <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-slate-700 bg-slate-800
+                font-mono text-xs font-semibold text-slate-400">
       <%= step.position %>
     </div>
-    <div class="mt-1 w-px flex-1 bg-slate-200"></div>
+    <div class="mt-1 w-px flex-1 bg-slate-800"></div>
   </div>
 
-  <div class="mb-4 flex-1 rounded-lg border border-slate-200 bg-white p-4">
+  <div class="card mb-4 flex-1 p-4">
     <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
       <div class="flex items-center gap-2">
-        <span class="step-name font-medium text-slate-900"><%= step.name %></span>
-        <span class="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500"><%= step.kind %></span>
+        <span class="step-name font-medium text-slate-100"><%= step.name %></span>
+        <span class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-slate-400"><%= step.kind %></span>
         <% if step.attempt > 1 %>
-          <span class="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">attempt <%= step.attempt %></span>
+          <span class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-slate-400">attempt <%= step.attempt %></span>
         <% end %>
       </div>
       <span class="step-status"><%= status_badge(step.status) %></span>
@@ -24,19 +24,19 @@
     <% if step.input.present? %>
       <div class="mb-2">
         <p class="field-label">Prompt</p>
-        <pre class="step-input overflow-x-auto whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs text-slate-700"><%= step.input %></pre>
+        <pre class="step-input overflow-x-auto whitespace-pre-wrap rounded bg-slate-950/60 p-2 font-mono text-xs text-slate-400"><%= step.input %></pre>
       </div>
     <% end %>
 
     <% if step.output.present? %>
       <div class="mb-2">
         <p class="field-label">Response</p>
-        <pre class="step-output overflow-x-auto whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs text-slate-700"><%= step.output %></pre>
+        <pre class="step-output overflow-x-auto whitespace-pre-wrap rounded bg-slate-950/60 p-2 font-mono text-xs text-slate-400"><%= step.output %></pre>
       </div>
     <% end %>
 
     <% if step.model.present? %>
-      <div class="flex flex-wrap gap-3 text-xs text-slate-500">
+      <div class="flex flex-wrap gap-3 font-mono text-xs text-slate-500">
         <span><%= step.model %></span>
         <span><%= step.input_tokens %> in / <%= step.output_tokens %> out tokens</span>
         <% if step.cost_cents %>
@@ -46,7 +46,7 @@
     <% end %>
 
     <% if error_message %>
-      <p class="step-error mt-2 rounded bg-rose-50 px-2 py-1 text-xs text-rose-700"><%= error_message %></p>
+      <p class="step-error mt-2 rounded bg-rose-500/10 px-2 py-1 text-xs text-rose-300"><%= error_message %></p>
     <% end %>
   </div>
 </div>

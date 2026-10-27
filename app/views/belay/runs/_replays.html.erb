@@ -1,13 +1,13 @@
-<div class="mb-6 rounded-lg border border-slate-200 bg-white p-4">
-  <h2 class="mb-2 text-sm font-semibold text-slate-900">Replays</h2>
-  <ul class="space-y-1 text-sm">
+<div class="card mb-6 p-4">
+  <h2 class="mb-2 text-sm font-semibold text-slate-100">Replays</h2>
+  <ul class="space-y-1 text-sm text-slate-400">
     <% @run.replays.each do |replay| %>
       <li>
-        <%= link_to replay.id, run_path(replay), class: "text-sky-700 hover:underline" %>
+        <%= link_to replay.id, run_path(replay), class: "font-mono text-violet-300 hover:text-violet-200" %>
         <% if replay.replay_model %>
-          (<code class="rounded bg-slate-100 px-1 py-0.5 text-xs"><%= replay.replay_model %></code>)
+          (<code class="rounded bg-slate-800 px-1 py-0.5 font-mono text-xs text-slate-300"><%= replay.replay_model %></code>)
         <% end %>
-        &middot; <%= link_to "view diff", diff_run_path(replay), class: "text-sky-700 hover:underline" %>
+        &middot; <%= link_to "view diff", diff_run_path(replay), class: "text-violet-300 hover:text-violet-200" %>
       </li>
     <% end %>
   </ul>

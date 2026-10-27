@@ -1,8 +1,8 @@
-<div class="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-6">
-  <h2 class="mb-1 text-sm font-semibold text-amber-900">
+<div class="mb-6 rounded-lg border border-amber-500/25 bg-amber-500/5 p-6">
+  <h2 class="mb-1 text-sm font-semibold text-amber-300">
     Needs review: <%= @run.pending_needs_review.name %>
   </h2>
-  <p class="mb-4 text-sm text-amber-800"><%= @run.pending_needs_review.error&.dig("reason") %></p>
+  <p class="mb-4 text-sm text-amber-200/80"><%= @run.pending_needs_review.error&.dig("reason") %></p>
 
   <div class="flex flex-wrap gap-6">
     <%= form_with url: resolve_run_path(@run), method: :post, local: true, class: "min-w-60 flex-1 space-y-2" do |f| %>

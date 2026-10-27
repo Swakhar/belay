@@ -4,16 +4,53 @@
   # Tailwind's build-time content scanner (it reads the template's literal
   # source text, not its rendered output), so it would compile away to
   # nothing. A plain inline style is the correct tool here, not a workaround.
-  max_rate = daily_stats.map(&:calls_per_100_runs).max
-  max_rate = 1.0 if max_rate.to_f.zero? # avoid dividing by zero when every day's rate is 0
+  #
+  # Gridlines round UP to the next clean multiple of 20 above the real max,
+  # not the raw max itself - an axis that tops out at an arbitrary value like
+  # "83.4" reads as noise; "100" is a value a glance can actually anchor to.
+  raw_max = daily_stats.map(&:calls_per_100_runs).max.to_f
+  axis_max = raw_max.zero? ? 20.0 : (raw_max / 20.0).ceil * 20.0
+  gridlines = [axis_max, axis_max * 0.75, axis_max * 0.5, axis_max * 0.25, 0]
 %>
-<div class="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-  <div class="flex h-48 items-end gap-2">
-    <% daily_stats.each do |day| %>
-      <div class="flex flex-1 flex-col items-center gap-1" title="<%= day.date %>: <%= day.calls_per_100_runs %> per 100 runs">
-        <div class="w-full rounded-t bg-sky-500" style="height: <%= (day.calls_per_100_runs / max_rate * 100).round(1) %>%"></div>
-        <span class="text-xs text-slate-400"><%= day.date.strftime("%-m/%-d") %></span>
+<div class="card mb-6 p-6">
+  <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Calls per 100 runs</h2>
+
+  <div class="mt-6 flex h-48">
+    <div class="flex w-7 flex-col justify-between pb-6 pr-2 text-right">
+      <% gridlines.each do |value| %>
+        <span class="font-mono text-[10px] leading-none text-slate-600"><%= value.to_i %></span>
+      <% end %>
+    </div>
+
+    <div class="relative flex-1">
+      <div class="absolute inset-0 flex flex-col justify-between pb-6">
+        <% gridlines.each do %>
+          <div class="border-t border-slate-800"></div>
+        <% end %>
       </div>
-    <% end %>
+
+      <%# No items-end here - each bar-col needs its OWN definite height (via the
+          default stretch) for its bar's percentage height to resolve against;
+          justify-end on each bar-col below is what actually bottom-anchors it. %>
+      <div class="absolute inset-0 z-10 flex gap-2 pb-6">
+        <% daily_stats.each_with_index do |day, index| %>
+          <% is_endpoint = index == daily_stats.size - 1 %>
+          <div class="group flex flex-1 flex-col items-center justify-end gap-1.5"
+               title="<%= day.date %>: <%= day.calls_per_100_runs %> per 100 runs (<%= day.real_calls %> calls, <%= day.runs %> runs)">
+            <% if is_endpoint %>
+              <span class="stat-rate-label font-mono text-[11px] font-medium text-slate-200"><%= day.calls_per_100_runs %></span>
+            <% end %>
+            <div class="w-full max-w-[22px] rounded-t <%= is_endpoint ? "bg-violet-400" : "bg-violet-500/40 group-hover:bg-violet-400/70" %>"
+                 style="height: <%= [(day.calls_per_100_runs / axis_max * 100), 1.5].max.round(1) %>%"></div>
+          </div>
+        <% end %>
+      </div>
+
+      <div class="pointer-events-none absolute inset-x-0 bottom-0 flex gap-2">
+        <% daily_stats.each do |day| %>
+          <span class="flex-1 text-center font-mono text-[10px] text-slate-600"><%= day.date.strftime("%-m/%-d") %></span>
+        <% end %>
+      </div>
+    </div>
   </div>
 </div>

@@ -1,43 +1,43 @@
-<h1 class="mb-1 text-xl font-semibold text-slate-900">Replay diff</h1>
+<h1 class="mb-1 text-lg font-semibold text-slate-100">Replay diff</h1>
 <p class="mb-6 text-sm text-slate-500">
-  <%= link_to @run.id, run_path(@run), class: "text-sky-700 hover:underline" %>
+  <%= link_to @run.id, run_path(@run), class: "font-mono text-violet-300 hover:text-violet-200" %>
   replayed from
-  <%= link_to @run.replay_of_id, run_path(@run.replay_of), class: "text-sky-700 hover:underline" %>
+  <%= link_to @run.replay_of_id, run_path(@run.replay_of), class: "font-mono text-violet-300 hover:text-violet-200" %>
   <% if @run.replay_model %>
-    using <code class="rounded bg-slate-100 px-1 py-0.5 text-xs"><%= @run.replay_model %></code>
+    using <code class="rounded bg-slate-800 px-1 py-0.5 font-mono text-xs text-slate-300"><%= @run.replay_model %></code>
   <% end %>
 </p>
 
-<div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-  <table class="min-w-full divide-y divide-slate-200 text-sm">
-    <thead class="bg-slate-50">
+<div class="card overflow-hidden">
+  <table class="min-w-full divide-y divide-slate-800 text-sm">
+    <thead class="bg-slate-900/80">
       <tr>
-        <th class="px-4 py-2 text-left font-medium text-slate-500">Step</th>
-        <th class="px-4 py-2 text-left font-medium text-slate-500">Original output</th>
-        <th class="px-4 py-2 text-left font-medium text-slate-500">Replay output</th>
-        <th class="px-4 py-2 text-left font-medium text-slate-500"></th>
+        <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-slate-500">Step</th>
+        <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-slate-500">Original output</th>
+        <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-slate-500">Replay output</th>
+        <th class="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-slate-500"></th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-slate-100">
+    <tbody class="divide-y divide-slate-800">
       <% @diff.each do |entry| %>
-        <tr class="diff-row <%= "bg-amber-50" if entry[:changed] %>">
+        <tr class="diff-row <%= "bg-amber-500/5" if entry[:changed] %>">
           <td class="px-4 py-2">
-            <span class="font-medium text-slate-900"><%= entry[:name] %></span>
-            <span class="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500"><%= entry[:kind] %></span>
+            <span class="font-medium text-slate-100"><%= entry[:name] %></span>
+            <span class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-slate-400"><%= entry[:kind] %></span>
           </td>
           <td class="px-4 py-2">
-            <pre class="whitespace-pre-wrap text-xs text-slate-700"><%= entry[:original_output] %></pre>
+            <pre class="whitespace-pre-wrap font-mono text-xs text-slate-400"><%= entry[:original_output] %></pre>
           </td>
           <td class="px-4 py-2">
-            <pre class="whitespace-pre-wrap text-xs text-slate-700"><%= entry[:replay_output] %></pre>
+            <pre class="whitespace-pre-wrap font-mono text-xs text-slate-400"><%= entry[:replay_output] %></pre>
           </td>
           <td class="diff-status px-4 py-2 text-xs">
             <% if !entry[:replayed] %>
-              <span class="rounded-full bg-slate-100 px-2 py-0.5 text-slate-500">not reached</span>
+              <span class="rounded-full bg-slate-800 px-2 py-0.5 text-slate-400">not reached</span>
             <% elsif entry[:changed] %>
-              <span class="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">changed</span>
+              <span class="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-400">changed</span>
             <% else %>
-              <span class="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-800">unchanged</span>
+              <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-emerald-400">unchanged</span>
             <% end %>
           </td>
         </tr>

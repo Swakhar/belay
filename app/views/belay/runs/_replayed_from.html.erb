@@ -1,7 +1,7 @@
-<div class="mb-6 rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600">
-  Replayed from <%= link_to @run.replay_of_id, run_path(@run.replay_of), class: "text-sky-700 hover:underline" %>
+<div class="card mb-6 p-4 text-sm text-slate-400">
+  Replayed from <%= link_to @run.replay_of_id, run_path(@run.replay_of), class: "font-mono text-violet-300 hover:text-violet-200" %>
   <% if @run.replay_model %>
-    using <code class="rounded bg-slate-100 px-1 py-0.5 text-xs"><%= @run.replay_model %></code>
+    using <code class="rounded bg-slate-800 px-1 py-0.5 font-mono text-xs text-slate-300"><%= @run.replay_model %></code>
   <% end %>
-  &middot; <%= link_to "view diff", diff_run_path(@run), class: "text-sky-700 hover:underline" %>
+  &middot; <%= link_to "view diff", diff_run_path(@run), class: "text-violet-300 hover:text-violet-200" %>
 </div>

@@ -2,6 +2,12 @@
 
 module Belay
   class RunsController < ApplicationController
+    # No config knob for this - unlike lease_duration/heartbeat_interval/etc.,
+    # page size isn't something a workflow author's runtime behavior depends
+    # on, just a dashboard rendering choice. 25 keeps a page's table short
+    # enough to scan without scrolling on a typical laptop screen.
+    PER_PAGE = 25
+
     # status: is untrusted query input (anyone who passes authenticate_belay!
     # can still type anything into the URL). where(status: ...) on an
     # unrecognized value doesn't actually raise - unlike direct assignment
@@ -15,10 +21,16 @@ module Belay
     # so an unrecognized value just matches zero rows via an ordinary
     # parameterized WHERE, the same as it would for a typo'd value on any
     # other plain column.
+    #
+    # page: is untrusted the same way - clamp_page below never raises on a
+    # garbage value (negative, zero, non-numeric, past the last real page),
+    # same "friendly over strictly correct" treatment status:/workflow: above
+    # already get, for the same reason: a hand-edited or stale bookmarked URL
+    # should land somewhere sensible, not error or render an empty table.
     def index
-      @runs = filtered_runs
-      @statuses = Run.statuses.keys
       @workflows = Run.distinct.order(:workflow).pluck(:workflow)
+      @statuses = Run.statuses.keys
+      @runs = paginate(filtered_runs)
     end
 
     # Run.find, not a rescued custom lookup: ActiveRecord::RecordNotFound is
@@ -136,6 +148,19 @@ module Belay
       runs = runs.where(status: params[:status]) if Run.statuses.key?(params[:status])
       runs = runs.where(workflow: params[:workflow]) if params[:workflow].present?
       runs
+    end
+
+    # @total_pages and @page are both set here (not in #index itself) - they're
+    # pagination's own bookkeeping, not index's, and splitting them out of
+    # #index keeps that action's own ABC size down besides.
+    def paginate(scope)
+      @total_pages = [(scope.count / PER_PAGE.to_f).ceil, 1].max
+      @page = clamp_page(params[:page])
+      scope.offset((@page - 1) * PER_PAGE).limit(PER_PAGE)
+    end
+
+    def clamp_page(raw)
+      raw.to_i.clamp(1, @total_pages)
     end
   end
 end

@@ -70,6 +70,16 @@ RSpec.describe Belay::RunsController do
     Belay::Run.create!({ workflow: workflow, workflow_version: "v1", status: status }.merge(attrs))
   end
 
+  # Distinct created_at (not just distinct workflow names) is what actually
+  # gives each run a deterministic position in the index's created_at: :desc
+  # order - without it, 30 runs created in the same test could tie on
+  # creation timestamp depending on DB timestamp precision, making which ones
+  # land on page 1 vs page 2 nondeterministic.
+  def build_runs_with_distinct_order(count)
+    base = Time.current
+    count.times { |i| build_run(workflow: "Workflow#{i}", created_at: base + i.seconds) }
+  end
+
   def configure_fake_provider(*responses)
     Belay.configure { |c| c.provider = Belay::FakeProvider.new(responses: responses) }
   end
@@ -182,6 +192,83 @@ RSpec.describe Belay::RunsController do
         doc = Nokogiri::HTML(session.response.body)
         href = doc.css(".run-workflow").first["href"]
         expect(href).to eq("/belay/runs/#{run.id}?return_to=%2Fbelay%2Fruns%3Fstatus%3Drunning")
+      end
+
+      it "limits the runs list to 25 per page, rather than rendering every run at once" do
+        build_runs_with_distinct_order(30)
+
+        session = get("/belay/runs")
+
+        expect(cells(session, "run-workflow").size).to eq(25)
+      end
+
+      it "shows the remaining runs on page 2 - not whatever page 1 already showed" do
+        build_runs_with_distinct_order(30)
+
+        page1 = cells(get("/belay/runs"), "run-workflow")
+        page2 = cells(get("/belay/runs?page=2"), "run-workflow")
+
+        expect(page2.size).to eq(5)
+        expect(page1 & page2).to be_empty
+      end
+
+      it "shows no pagination controls at all when every run already fits on one page" do
+        build_run
+
+        session = get("/belay/runs")
+
+        expect(Nokogiri::HTML(session.response.body).css(".pagination-status")).to be_empty
+      end
+
+      it "shows Page X of Y once there's more than one page" do
+        build_runs_with_distinct_order(30)
+
+        session = get("/belay/runs?page=2")
+
+        text = Nokogiri::HTML(session.response.body).css(".pagination-status").first.text
+        expect(text).to eq("Page 2 of 2")
+      end
+
+      it "disables Previous on the first page and Next on the last page, rather than linking nowhere useful" do
+        build_runs_with_distinct_order(30)
+
+        page1 = Nokogiri::HTML(get("/belay/runs").response.body)
+        expect(page1.css(".pagination-prev")).to be_empty
+        expect(page1.css(".pagination-next")).not_to be_empty
+
+        page2 = Nokogiri::HTML(get("/belay/runs?page=2").response.body)
+        expect(page2.css(".pagination-prev")).not_to be_empty
+        expect(page2.css(".pagination-next")).to be_empty
+      end
+
+      it "keeps the current status filter in the pagination links, not just the table rows" do
+        base = Time.current
+        30.times { |i| build_run(workflow: "InvoiceWorkflow", status: "running", created_at: base + i.seconds) }
+
+        session = get("/belay/runs?status=running")
+
+        href = Nokogiri::HTML(session.response.body).css(".pagination-next").first["href"]
+        expect(href).to include("status=running").and include("page=2")
+      end
+
+      it "clamps a ?page= past the last real page to the last page, rather than showing an empty table" do
+        build_runs_with_distinct_order(30)
+
+        session = get("/belay/runs?page=999")
+
+        doc = Nokogiri::HTML(session.response.body)
+        expect(doc.css(".pagination-status").first.text).to eq("Page 2 of 2")
+        expect(cells(session, "run-workflow").size).to eq(5)
+      end
+
+      it "clamps a non-numeric or negative ?page= to the first page, rather than raising" do
+        build_runs_with_distinct_order(30)
+
+        expect { get("/belay/runs?page=not-a-number") }.not_to raise_error
+        expect { get("/belay/runs?page=-5") }.not_to raise_error
+
+        doc = Nokogiri::HTML(get("/belay/runs?page=-5").response.body)
+        expect(doc.css(".pagination-status").first.text).to eq("Page 1 of 2")
       end
     end
   end

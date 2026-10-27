@@ -55,6 +55,16 @@ module Belay
     # another host, a lookalike path) falls back to the plain runs index
     # instead of becoming an open redirect a human could be tricked into
     # clicking.
+    # The runs index's own pagination links need every OTHER current query
+    # param (status:/workflow:) preserved while only page: changes - plain
+    # symbolize_keys, not a fresh hash, so an existing ?page= in
+    # request.query_parameters (String-keyed) is actually replaced by the
+    # Symbol-keyed page: below rather than both ending up in the merged hash
+    # as two different keys pointing at the same query param.
+    def pagination_params(request, page)
+      request.query_parameters.symbolize_keys.merge(page: page)
+    end
+
     def back_to_runs_path(request)
       candidate = request.params[:return_to]
       base = runs_path

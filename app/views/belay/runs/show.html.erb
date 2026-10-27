@@ -1,3 +1,6 @@
+<%= link_to "← Back to runs", back_to_runs_path(request),
+            class: "back-to-runs mb-4 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-slate-100" %>
+
 <%= render "belay/runs/header" %>
 
 <% if @run.replay_of %>

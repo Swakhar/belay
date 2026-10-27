@@ -78,5 +78,26 @@ RSpec.describe Belay::Engine do
 
       expect(session.response.body).to include("<style>#{described_class.stylesheet}</style>")
     end
+
+    it "appends config.custom_css after the compiled stylesheet, in the same <style> tag, " \
+       "so a same-specificity rule overrides by cascade order" do
+      Belay.configure do |c|
+        c.authenticate_with = ->(_request) { true }
+        c.custom_css = ".btn-primary { background: #ff0000 }"
+      end
+
+      session = get("/belay/")
+
+      expect(session.response.body)
+        .to include("<style>#{described_class.stylesheet}.btn-primary { background: #ff0000 }</style>")
+    end
+
+    it "renders nothing extra when custom_css is left at its nil default" do
+      Belay.configure { |c| c.authenticate_with = ->(_request) { true } }
+
+      session = get("/belay/")
+
+      expect(session.response.body).to include("<style>#{described_class.stylesheet}</style>")
+    end
   end
 end

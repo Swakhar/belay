@@ -45,5 +45,22 @@ module Belay
       content_tag(:span, status, class: "status-badge inline-flex items-center rounded-full px-2.5 py-0.5 " \
                                         "text-xs font-medium #{BADGE_CLASSES.fetch(color)}")
     end
+
+    # The runs index hands its own current path (filters and all) to each run
+    # link as return_to:, so a run's "back to runs" link restores the exact
+    # filtered list a human came from, not always the unfiltered one.
+    # return_to: is otherwise untrusted query input - anyone can hand-edit a
+    # URL - so only a value that's actually runs_path itself, or runs_path
+    # with a query string, is honored; anything else (an absolute URL to
+    # another host, a lookalike path) falls back to the plain runs index
+    # instead of becoming an open redirect a human could be tricked into
+    # clicking.
+    def back_to_runs_path(request)
+      candidate = request.params[:return_to]
+      base = runs_path
+      return base unless candidate.is_a?(String) && (candidate == base || candidate.start_with?("#{base}?"))
+
+      candidate
+    end
   end
 end

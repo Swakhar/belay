@@ -4,7 +4,7 @@
     <title>Belay</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <%= csrf_meta_tags %>
-    <style><%= raw Belay::Engine.stylesheet %></style>
+    <style><%= raw Belay::Engine.stylesheet %><%= raw Belay.config.custom_css %></style>
   </head>
   <body class="flex min-h-screen bg-slate-950 font-sans text-slate-100 antialiased">
     <%= render "belay/shared/sidebar" %>

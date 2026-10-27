@@ -25,7 +25,8 @@
         <% @runs.each do |run| %>
           <tr class="hover:bg-slate-800/60">
             <td class="px-4 py-2">
-              <%= link_to run.workflow, run_path(run), class: "run-workflow font-medium text-violet-300 hover:text-violet-200" %>
+              <%= link_to run.workflow, run_path(run, return_to: request.fullpath),
+                          class: "run-workflow font-medium text-violet-300 hover:text-violet-200" %>
             </td>
             <td class="run-status px-4 py-2"><%= status_badge(run.status) %></td>
             <td class="px-4 py-2 font-mono text-xs text-slate-500"><%= run.started_at %></td>

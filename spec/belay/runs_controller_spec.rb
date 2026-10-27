@@ -172,6 +172,17 @@ RSpec.describe Belay::RunsController do
 
         expect(session.response.body).to include("/belay/runs/#{run.id}")
       end
+
+      it "hands its own current path, filters included, to each run link as return_to: - " \
+         "so the run's own back link can restore the exact filtered list, not just the bare index" do
+        run = build_run(workflow: "InvoiceWorkflow", status: "running")
+
+        session = get("/belay/runs?status=running")
+
+        doc = Nokogiri::HTML(session.response.body)
+        href = doc.css(".run-workflow").first["href"]
+        expect(href).to eq("/belay/runs/#{run.id}?return_to=%2Fbelay%2Fruns%3Fstatus%3Drunning")
+      end
     end
   end
 
@@ -269,6 +280,34 @@ RSpec.describe Belay::RunsController do
         session = get("/belay/runs/#{run.id}")
 
         expect(session.response.body).to include("Needs review")
+      end
+
+      it "links back to the plain runs index when there's no return_to: (visited directly, not via the index)" do
+        run = build_run
+
+        session = get("/belay/runs/#{run.id}")
+
+        doc = Nokogiri::HTML(session.response.body)
+        expect(doc.css(".back-to-runs").first["href"]).to eq("/belay/runs")
+      end
+
+      it "links back to the exact filtered list given in return_to:" do
+        run = build_run
+
+        session = get("/belay/runs/#{run.id}?return_to=%2Fbelay%2Fruns%3Fstatus%3Drunning")
+
+        doc = Nokogiri::HTML(session.response.body)
+        expect(doc.css(".back-to-runs").first["href"]).to eq("/belay/runs?status=running")
+      end
+
+      it "falls back to the plain runs index for a return_to: pointing off-site, rather than letting a " \
+         "hand-edited URL turn the back link into an open redirect" do
+        run = build_run
+
+        session = get("/belay/runs/#{run.id}?return_to=https%3A%2F%2Fevil.example%2Fphish")
+
+        doc = Nokogiri::HTML(session.response.body)
+        expect(doc.css(".back-to-runs").first["href"]).to eq("/belay/runs")
       end
     end
   end

@@ -23,6 +23,10 @@ RSpec.describe Belay::Configuration do
     expect(configuration.rule_approval_threshold).to eq(3)
   end
 
+  it "defaults custom_css to nil" do
+    expect(configuration.custom_css).to be_nil
+  end
+
   it "allows overriding each setting" do
     provider = Belay::FakeProvider.new
     configuration.lease_duration = 900
@@ -30,12 +34,14 @@ RSpec.describe Belay::Configuration do
     configuration.provider = provider
     configuration.cache_ttl = nil
     configuration.rule_approval_threshold = 5
+    configuration.custom_css = ".btn-primary { background: #000 }"
 
     expect(configuration.lease_duration).to eq(900)
     expect(configuration.heartbeat_interval).to eq(60)
     expect(configuration.provider).to equal(provider)
     expect(configuration.cache_ttl).to be_nil
     expect(configuration.rule_approval_threshold).to eq(5)
+    expect(configuration.custom_css).to eq(".btn-primary { background: #000 }")
   end
 end
 

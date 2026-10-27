@@ -38,6 +38,15 @@ module Belay
     # learned rule matches, before ever pausing.
     attr_accessor :rule_approval_threshold
 
+    # Extra CSS appended, in the layout's own <style> tag, right after the
+    # dashboard's compiled Tailwind build - not a replacement for it. Appended
+    # rather than merged means a same-specificity rule (redeclaring .btn-primary,
+    # say) wins by ordinary cascade order, no !important required; nil by
+    # default renders nothing extra. A plain String, not a path or an asset -
+    # this gem has no asset pipeline opinion to lean on (see Engine.stylesheet's
+    # own comment), so the host app owns wherever this string actually comes from.
+    attr_accessor :custom_css
+
     def initialize
       @lease_duration = 300
       @heartbeat_interval = 30
@@ -45,6 +54,7 @@ module Belay
       @authenticate_with = nil
       @cache_ttl = 7 * 24 * 60 * 60 # 7 days
       @rule_approval_threshold = 3
+      @custom_css = nil
     end
   end
 end

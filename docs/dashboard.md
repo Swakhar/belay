@@ -27,7 +27,7 @@ Because `authenticate_with` has no identity concept, Belay also has no way to re
 
 ## Pages
 
-- **Runs** (root, `Belay::RunsController#index`) - every run, most recently created first, with `?status=`/`?workflow=` filters.
+- **Runs** (root, `Belay::RunsController#index`) - every run, most recently created first, with `?status=`/`?workflow=` filters, paginated 25 per page (`?page=`).
 - **Run detail** (`#show`) - the full step timeline (every retry attempt, not just the latest), an `llm_call` step's prompt/response/model/tokens/cost, and forms for whichever of approve!/reject!/resolve_needs_review! applies.
 - **Replay diff** (`#diff`) - a side-by-side table of `run.replay_diff`, one row per step, flagged changed/unchanged/not-reached.
 - **Stats** (`Belay::StatsController#index`) - real provider calls (an `llm_call` step with `cache_hit: false`) per 100 runs, by day, so caching and rules' actual effect on cost is something you can look at rather than code with no visible effect.

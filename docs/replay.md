@@ -1,3 +1,9 @@
+---
+layout: default
+title: Replay
+nav_order: 4
+---
+
 # Replay
 
 ```ruby

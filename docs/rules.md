@@ -1,3 +1,9 @@
+---
+layout: default
+title: Rules
+nav_order: 3
+---
+
 # Rules
 
 ```ruby

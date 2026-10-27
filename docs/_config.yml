@@ -1,0 +1,14 @@
+title: Belay
+description: Durable execution for AI agents in Rails.
+remote_theme: just-the-docs/just-the-docs
+color_scheme: dark
+search_enabled: true
+plugins:
+  - jekyll-relative-links
+relative_links:
+  enabled: true
+  collections: true
+nav_sort: case_insensitive
+aux_links:
+  "View on GitHub":
+    - "https://github.com/Swakhar/belay"

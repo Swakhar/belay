@@ -1,3 +1,9 @@
+---
+layout: default
+title: Caching
+nav_order: 5
+---
+
 # Caching
 
 ```ruby

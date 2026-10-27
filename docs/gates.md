@@ -1,3 +1,9 @@
+---
+layout: default
+title: Gates and approvals
+nav_order: 2
+---
+
 # Gates and approvals
 
 ```ruby

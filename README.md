@@ -12,7 +12,7 @@ It sits under whatever prompting style you use and records everything. It is not
 
 ```mermaid
 flowchart TD
-    Start(["YourWorkflow.start"]) --> Running["running<br/>steps checkpointed<br/>one at a time"]
+    Start(["YourWorkflow<br/>start"]) --> Running["running<br/>steps checkpointed<br/>one at a time"]
     Running -->|every step ran| Completed(["completed"])
     Running -->|"gate's when: true"| Paused["paused<br/>awaiting a human"]
     Paused -->|"run.approve!"| Running

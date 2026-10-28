@@ -5,6 +5,17 @@ RSpec.describe Belay::Run do
     described_class.create!({ workflow: "InvoiceWorkflow", workflow_version: "v1" }.merge(attrs))
   end
 
+  # ActiveSupport::Notifications.subscribed, not .subscribe - it unsubscribes the
+  # callback itself once the block returns, so a spec here can never leak a
+  # listener into the next one even if it never gets around to unsubscribing by
+  # hand.
+  def capture_notifications(pattern, &block)
+    events = []
+    callback = ->(name, _start, _finish, _id, payload) { events << [name, payload] }
+    ActiveSupport::Notifications.subscribed(callback, pattern, &block)
+    events
+  end
+
   describe "#replay_of / #replays" do
     it "defaults to no replay_of, for an ordinary run" do
       run = build_run
@@ -131,6 +142,43 @@ RSpec.describe Belay::Run do
 
       expect { run.start! }.to raise_error(Belay::InvalidTransitionError)
       expect { run.cancel! }.to raise_error(Belay::InvalidTransitionError)
+    end
+  end
+
+  describe "instrumentation" do
+    it "instruments belay.run.<event> for each of start!/pause!/resume!/complete!, with run/workflow/from/to" do
+      run = build_run
+
+      events = capture_notifications(/^belay\.run\./) { run.start! }
+      expect(events.size).to eq(1)
+      name, payload = events.first
+      expect(name).to eq("belay.run.started")
+      expect(payload).to eq(run_id: run.id, workflow: "InvoiceWorkflow", workflow_version: "v1",
+                            from: "pending", to: "running")
+
+      expect(capture_notifications(/^belay\.run\./) { run.pause! }.first[0]).to eq("belay.run.paused")
+      expect(capture_notifications(/^belay\.run\./) { run.resume! }.first[0]).to eq("belay.run.resumed")
+      expect(capture_notifications(/^belay\.run\./) { run.complete! }.first[0]).to eq("belay.run.completed")
+    end
+
+    it "instruments belay.run.failed and belay.run.cancelled" do
+      running_run = build_run.tap(&:start!) # start! is outside the capture below, deliberately -
+      # otherwise its own belay.run.started would be the first event captured, not fail!'s.
+      failed_events = capture_notifications(/^belay\.run\./) { running_run.fail!(error: { "message" => "boom" }) }
+      expect(failed_events.first[0]).to eq("belay.run.failed")
+
+      cancelled_events = capture_notifications(/^belay\.run\./) { build_run.cancel! }
+      expect(cancelled_events.first[0]).to eq("belay.run.cancelled")
+    end
+
+    it "instruments nothing when a transition is rejected" do
+      run = build_run
+
+      events = capture_notifications(/^belay\.run\./) do
+        expect { run.pause! }.to raise_error(Belay::InvalidTransitionError)
+      end
+
+      expect(events).to be_empty
     end
   end
 
@@ -521,6 +569,21 @@ RSpec.describe Belay::Run do
       expect { run.approve!(by: "reviewer@example.com") }.not_to raise_error
       expect(Belay::Rule.count).to eq(0)
     end
+
+    it "instruments belay.gate.approved with the gate's name, by:, and whether it was edited" do
+      run = build_paused_run
+      gate = run.pending_gate
+
+      events = capture_notifications(/^belay\.gate\./) do
+        run.approve!(by: "reviewer@example.com", edited_payload: { total_cents: 999 })
+      end
+
+      expect(events.size).to eq(1)
+      name, payload = events.first
+      expect(name).to eq("belay.gate.approved")
+      expect(payload).to eq(run_id: run.id, step_id: gate.id, name: "approval", by: "reviewer@example.com",
+                            edited: true)
+    end
   end
 
   describe "#reject!" do
@@ -553,6 +616,18 @@ RSpec.describe Belay::Run do
       rule = Belay::Rule.sole
       expect(rule).to have_attributes(gate_name: "approval", context_key: gate.input["context_key"],
                                       status: "invalidated")
+    end
+
+    it "instruments belay.gate.rejected with the gate's name and by:" do
+      run = build_paused_run
+      gate = run.pending_gate
+
+      events = capture_notifications(/^belay\.gate\./) { run.reject!(by: "reviewer@example.com") }
+
+      expect(events.size).to eq(1)
+      name, payload = events.first
+      expect(name).to eq("belay.gate.rejected")
+      expect(payload).to eq(run_id: run.id, step_id: gate.id, name: "approval", by: "reviewer@example.com")
     end
   end
 

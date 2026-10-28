@@ -36,15 +36,15 @@ module Belay
     validates :workflow_version, presence: true
 
     def start!
-      transition!(from: "pending", to: "running", started_at: Time.current)
+      transition!(from: "pending", to: "running", event: "started", started_at: Time.current)
     end
 
     def pause!
-      transition!(from: "running", to: "paused")
+      transition!(from: "running", to: "paused", event: "paused")
     end
 
     def resume!
-      transition!(from: "paused", to: "running")
+      transition!(from: "paused", to: "running", event: "resumed")
     end
 
     # None of complete!/fail!/cancel! below clear lease_owner/lease_expires_at - a
@@ -53,15 +53,16 @@ module Belay
     # first, so a stale lease on a terminal run is never actually read. Would need
     # fixing if anything ever queries leases without that status filter.
     def complete!
-      transition!(from: "running", to: "completed", finished_at: Time.current)
+      transition!(from: "running", to: "completed", event: "completed", finished_at: Time.current)
     end
 
     def fail!(error: nil)
-      transition!(from: %w[pending running paused], to: "failed", finished_at: Time.current, error: error)
+      transition!(from: %w[pending running paused], to: "failed", event: "failed",
+                  finished_at: Time.current, error: error)
     end
 
     def cancel!
-      transition!(from: %w[pending running paused], to: "cancelled", finished_at: Time.current)
+      transition!(from: %w[pending running paused], to: "cancelled", event: "cancelled", finished_at: Time.current)
     end
 
     # At most one, by construction: Executor stops at the FIRST gate whose when:
@@ -251,6 +252,13 @@ module Belay
       # answer wasn't quite right, which is the opposite of "safe to auto-settle
       # identically next time."
       record_rule_decision!(gate, approved: true) if edited_payload.nil?
+      # Last, same ordering principle as ResumeRunJob/record_rule_decision! above: a
+      # subscriber that raises (ActiveSupport::Notifications runs subscribers
+      # synchronously, in-process - a slow or broken one is this gem's problem the
+      # moment it's subscribed) must never be able to leave the gate settled with no
+      # job enqueued, which placing this any earlier would risk.
+      ActiveSupport::Notifications.instrument("belay.gate.approved", run_id: id, step_id: gate.id, name: gate.name,
+                                                                     by: by, edited: !edited_payload.nil?)
     end
 
     # Rejects this run's pending gate: records a rejected Belay::Approval, settles
@@ -273,6 +281,8 @@ module Belay
       end
 
       record_rule_decision!(gate, approved: false)
+      ActiveSupport::Notifications.instrument("belay.gate.rejected", run_id: id, step_id: gate.id, name: gate.name,
+                                                                     by: by)
     end
 
     # The two outcomes a human can give a needs_review step (flag_needs_review!,
@@ -615,7 +625,19 @@ module Belay
     # No concurrency guard: this reads status in memory, then does a plain update!. Two
     # processes racing on the same run (stale in-memory copies) can both pass the check.
     # Deferred to the leases work (Phase 1f) rather than solved here.
-    def transition!(from:, to:, **attrs)
+    #
+    # event: is a separate argument from to:, not derived from it (e.g. "belay.run.#{to}") -
+    # to: "running" is reached by both start! and resume!, and those are two meaningfully
+    # different events for anything listening (ActiveSupport::Notifications.instrument
+    # below; see docs/instrumentation.md), the same way the comment above this method
+    # already explains why dispatch can't collapse them into one target-keyed graph either.
+    #
+    # Wrapping update! in .instrument, not instrumenting after the fact, is deliberate: a
+    # subscriber gets the real duration of the UPDATE for free (same convention
+    # ActiveRecord's own sql.active_record notification uses), and a failed update! never
+    # fires the event at all - nothing here is misreported as a transition that didn't
+    # actually happen.
+    def transition!(from:, to:, event:, **attrs)
       allowed_from = Array(from)
       unless allowed_from.include?(status)
         raise InvalidTransitionError,
@@ -623,7 +645,8 @@ module Belay
               "(expected current status to be #{allowed_from.inspect})"
       end
 
-      update!(**attrs, status: to)
+      payload = { run_id: id, workflow: workflow, workflow_version: workflow_version, from: status, to: to }
+      ActiveSupport::Notifications.instrument("belay.run.#{event}", payload) { update!(**attrs, status: to) }
     end
   end
 end

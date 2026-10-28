@@ -22,5 +22,6 @@ It sits under whatever prompting style you use and records everything. It is not
 - **[Caching](caching.md)** - `cacheable: true` and when it's actually safe to use.
 - **[Providers](providers.md)** - ships Anthropic, OpenAI, and Gemini providers; bring your own for anything else.
 - **[Dashboard](dashboard.md)** - mounting the engine and wiring in your own auth.
+- **[Instrumentation](instrumentation.md)** - `ActiveSupport::Notifications` events for the run/step/gate lifecycle.
 
 For installation, configuration, and the full workflow DSL, see the [README](https://github.com/Swakhar/belay#readme).

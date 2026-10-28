@@ -22,6 +22,16 @@ RSpec.describe Belay::Executor do
     run.reload
   end
 
+  # ActiveSupport::Notifications.subscribed, not .subscribe - see run_spec.rb's own
+  # copy of this helper for why (it unsubscribes itself, so a spec here can never
+  # leak a listener into the next one).
+  def capture_notifications(pattern, &block)
+    events = []
+    callback = ->(name, _start, _finish, _id, payload) { events << [name, payload] }
+    ActiveSupport::Notifications.subscribed(callback, pattern, &block)
+    events
+  end
+
   it "executes every step in declaration order, in one pass" do
     run = build_run
 
@@ -47,6 +57,22 @@ RSpec.describe Belay::Executor do
     described_class.new(run).call
 
     expect(run.steps.pluck(:status)).to all(eq("succeeded"))
+  end
+
+  it "instruments belay.step.completed once per step, with position/name/kind/status/attempt" do
+    run = build_run
+
+    events = capture_notifications(/^belay\.step\.completed$/) { described_class.new(run).call }
+
+    expect(events.size).to eq(3)
+    names, payloads = events.transpose
+    expect(names).to all(eq("belay.step.completed"))
+    steps = run.steps.order(:position).index_by(&:name)
+    expected = [%w[extract decision], %w[verify decision], %w[book tool_call]].each_with_index.map do |(name, kind), i|
+      { run_id: run.id, position: i, name: name, kind: kind, status: "succeeded", attempt: 1 }
+    end
+    expect(payloads.map { |p| p.except(:step_id) }).to eq(expected)
+    expect(payloads.map { |p| p[:step_id] }).to eq(%w[extract verify book].map { |name| steps[name].id })
   end
 
   it "defaults kind to decision when a step doesn't declare one, but respects an explicit kind:" do
@@ -441,6 +467,27 @@ RSpec.describe Belay::Executor do
         .to raise_error(Belay::Error, /position 0 is needs_review/)
     end
 
+    it "instruments belay.step.needs_review with the step's name and reason" do
+      stub_const("ExecutorSpecNeedsReviewInstrumentationWorkflow", Class.new(Belay::Workflow) do
+        input :invoice_id
+        step(:extract) { |ctx| { total_cents: ctx.invoice_id * 100 } }
+      end)
+      run = build_run(workflow_class: ExecutorSpecNeedsReviewInstrumentationWorkflow)
+      step = simulate_crashed_step(run)
+
+      events = capture_notifications(/^belay\.step\.needs_review$/) do
+        expect { described_class.new(run).call }.to raise_error(Belay::Error)
+      end
+
+      expect(events.size).to eq(1)
+      name, payload = events.first
+      expect(name).to eq("belay.step.needs_review")
+      expect(payload[:run_id]).to eq(run.id)
+      expect(payload[:step_id]).to eq(step.id)
+      expect(payload[:name]).to eq("extract")
+      expect(payload[:reason]).to match(/idempotent: true/)
+    end
+
     it "does not require idempotent: true for a step's normal first execution - only for resuming a crash" do
       stub_const("ExecutorSpecFreshNonIdempotentWorkflow", Class.new(Belay::Workflow) do
         input :invoice_id
@@ -575,6 +622,19 @@ RSpec.describe Belay::Executor do
       expect(run.steps.where(position: 2)).to be_empty # :book never ran
     end
 
+    it "instruments belay.gate.paused, after the pause/release-lease transaction has already committed" do
+      stub_const("ExecutorSpecGatePausedInstrumentationWorkflow", gate_workflow(->(_ctx) { true }))
+      run = build_run(workflow_class: ExecutorSpecGatePausedInstrumentationWorkflow)
+
+      events = capture_notifications(/^belay\.gate\.paused$/) { described_class.new(run).call }
+
+      expect(events.size).to eq(1)
+      name, payload = events.first
+      gate_step = run.steps.find_by(position: 1)
+      expect(name).to eq("belay.gate.paused")
+      expect(payload).to eq(run_id: run.id, step_id: gate_step.id, name: "approval")
+    end
+
     it "stashes a context_key on the gate step, derived from the exact input/outputs when: saw" do
       condition = ->(_ctx) { true }
       stub_const("ExecutorSpecGateContextKeyWorkflow", gate_workflow(condition))
@@ -608,6 +668,25 @@ RSpec.describe Belay::Executor do
       expect(gate_step.approval).to be_nil # no human ever decided this one
       expect(run.reload.status).to eq("completed") # never paused - :book ran right past it
       expect(run.steps.find_by(position: 2).output).to eq("booked")
+    end
+
+    it "instruments belay.gate.auto_approved, with the rule's own id, instead of belay.gate.paused" do
+      condition = ->(_ctx) { true }
+      stub_const("ExecutorSpecAutoApprovedEventWorkflow", gate_workflow(condition))
+      run = build_run(workflow_class: ExecutorSpecAutoApprovedEventWorkflow)
+      context_key = Belay::Rule.context_key_for(input: { invoice_id: 42 }, outputs: { extract: { total_cents: 4200 } },
+                                                condition: condition)
+      rule = Belay::Rule.record_approval!(workflow: ExecutorSpecAutoApprovedEventWorkflow.name,
+                                          workflow_version: ExecutorSpecAutoApprovedEventWorkflow.workflow_version,
+                                          gate_name: "approval", context_key: context_key, threshold: 1)
+
+      events = capture_notifications(/^belay\.gate\./) { described_class.new(run).call }
+
+      expect(events.size).to eq(1)
+      name, payload = events.first
+      gate_step = run.steps.find_by(position: 1)
+      expect(name).to eq("belay.gate.auto_approved")
+      expect(payload).to eq(run_id: run.id, step_id: gate_step.id, name: "approval", rule_id: rule.id)
     end
 
     it "does NOT auto-settle a gate whose when: was edited, even though a rule is active for the " \

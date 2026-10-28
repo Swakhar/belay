@@ -146,6 +146,12 @@ A runs index, a run detail page with the full step timeline, a replay diff view,
 
 **→ [docs/dashboard.md](docs/dashboard.md)** for mounting, wiring in your own auth (Devise/Pundit/CanCanCan/anything), and what each page shows.
 
+## Instrumentation
+
+Belay publishes `ActiveSupport::Notifications` events for the run/step/gate lifecycle (`belay.run.started`, `belay.step.completed`, `belay.gate.paused`, and others) - the same mechanism Rails itself uses for `sql.active_record`, so you can pipe what Belay is doing into your own logs/APM without polling the dashboard.
+
+**→ [docs/instrumentation.md](docs/instrumentation.md)** for the full event list and payloads.
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md).

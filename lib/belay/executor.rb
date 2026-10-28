@@ -186,6 +186,8 @@ module Belay
         # human. Run#pause! already exists (running -> paused) for exactly this shape
         # of "stopped, not failed, waiting on something external."
         @run.pause!
+        ActiveSupport::Notifications.instrument("belay.step.needs_review", run_id: @run.id, step_id: existing.id,
+                                                                           name: existing.name, reason: reason)
         raise Error, "#{reason} - flagged needs_review; the run is paused until a human resolves it"
       end
 
@@ -240,12 +242,37 @@ module Belay
         output = run_block(step_run, context, step)
         return [nil, nil] if output.equal?(AUTO_SETTLED) # auto_settle_gate! already wrote this row itself
 
-        step.update!(status: settled_status(step_run), output: output, **extra_step_attrs(step_run, context))
-        [output, nil]
+        settle_succeeded!(step_run, step, context, output)
       rescue StandardError => e
-        step.update!(status: "failed", error: { "class" => e.class.name, "message" => e.message },
+        settle_failed!(step_run, step, context, e)
+      end
+
+      def settle_succeeded!(step_run, step, context, output)
+        status = settled_status(step_run)
+        step.update!(status: status, output: output, **extra_step_attrs(step_run, context))
+        instrument_step_completed(step, status: status)
+        [output, nil]
+      end
+
+      def settle_failed!(step_run, step, context, error)
+        step.update!(status: "failed", error: { "class" => error.class.name, "message" => error.message },
                      **extra_step_attrs(step_run, context))
-        [nil, e]
+        instrument_step_completed(step, status: "failed")
+        [nil, error]
+      end
+
+      # One event per settled attempt (success or failure alike), not separate
+      # started/completed events - the same consolidation ActionController's own
+      # process_action.action_controller notification makes (one event, status: in
+      # the payload), rather than one event per outcome. A step's own row already
+      # records attempt: - a retried step fires this once per attempt, same as it
+      # gets its own Step row per attempt.
+      def instrument_step_completed(step, status:)
+        ActiveSupport::Notifications.instrument(
+          "belay.step.completed",
+          run_id: @run.id, step_id: step.id, position: step.position, name: step.name,
+          kind: step.kind, status: status, attempt: step.attempt
+        )
       end
 
       # Wrapped in @run.heartbeat_while, not called bare - this is the one call in
@@ -311,6 +338,8 @@ module Belay
       def auto_settle_gate!(step, context_key, rule)
         step.update!(status: "succeeded", output: nil, input: { "context_key" => context_key },
                      rule_applied_id: rule.id)
+        ActiveSupport::Notifications.instrument("belay.gate.auto_approved", run_id: @run.id, step_id: step.id,
+                                                                            name: step.name, rule_id: rule.id)
         AUTO_SETTLED
       end
 
@@ -347,6 +376,8 @@ module Belay
           @run.pause!
           @run.release_lease!
         end
+        ActiveSupport::Notifications.instrument("belay.gate.paused", run_id: @run.id, step_id: step.id,
+                                                                     name: step.name)
         throw :gate_paused
       end
 

@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `Belay::OpenAIProvider`, calling either of OpenAI's current APIs
+  (`api: :responses`, the default, or `api: :chat_completions`), with the
+  same structured-output/cost/latency contract as `AnthropicProvider`.
+- `Belay::GeminiProvider`, calling Google's Gemini API.
+- `ActiveSupport::Notifications` instrumentation for the run/step/gate
+  lifecycle (`belay.run.*`, `belay.step.completed`, `belay.step.needs_review`,
+  `belay.gate.*`), so a host app can pipe what Belay is doing into its own
+  logs/APM without polling the dashboard.
+
 ## [0.1.0] - 2026-10-27
 
 ### Added

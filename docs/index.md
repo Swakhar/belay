@@ -20,7 +20,7 @@ It sits under whatever prompting style you use and records everything. It is not
 - **[Rules](rules.md)** - how a consistently-approved gate learns to stop pausing.
 - **[Replay](replay.md)** - re-running a completed run's model calls against a different model.
 - **[Caching](caching.md)** - `cacheable: true` and when it's actually safe to use.
-- **[Providers](providers.md)** - Belay isn't Anthropic-only; bring your own.
+- **[Providers](providers.md)** - ships Anthropic, OpenAI, and Gemini providers; bring your own for anything else.
 - **[Dashboard](dashboard.md)** - mounting the engine and wiring in your own auth.
 
 For installation, configuration, and the full workflow DSL, see the [README](https://github.com/Swakhar/belay#readme).

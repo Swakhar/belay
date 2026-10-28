@@ -132,7 +132,7 @@ ctx.llm(model:, prompt:, schema: nil, cacheable: false)
 
 Calls `Belay.config.provider`, validates the response against `schema:` provider-agnostically, and returns `response.content` directly as the step's own output.
 
-**→ [docs/providers.md](docs/providers.md)** - Belay isn't Anthropic-only; bring your own provider.
+**→ [docs/providers.md](docs/providers.md)** - ships `AnthropicProvider`, `OpenAIProvider`, and `GeminiProvider`; bring your own for anything else.
 **→ [docs/caching.md](docs/caching.md)** - `cacheable: true` and when it's actually safe to use.
 
 ## Dashboard
